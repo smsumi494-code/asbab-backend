@@ -1,0 +1,12 @@
+# Copy these into Railway's "Variables" tab for this service.
+# Don't put real values in this file — it's just a reference.
+
+# Auto-filled by Railway when you attach a Postgres service (usually you can
+# reference it as ${{Postgres.DATABASE_URL}} instead of typing it manually)
+DATABASE_URL=
+
+# From your Steadfast merchant panel -> API section
+STEADFAST_API_KEY=
+STEADFAST_SECRET_KEY=
+
+NODE_ENV=production
