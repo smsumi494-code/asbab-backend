@@ -1,4 +1,4 @@
-// routes/entries.js
+// entries.js
 const express = require("express");
 const router = express.Router();
 const pool = require("./db");
@@ -7,21 +7,57 @@ const pool = require("./db");
 function toApiShape(row) {
   return {
     id: row.id,
-    productCode: row.product_code,
+    rawText: row.raw_text,
     imageUrl: row.image_url,
-    hata: row.hata,
-    long: row.long_size,
-    tag: row.tag,
+    moderator: row.moderator,
+    status: row.status,
+    // Filled in automatically by AI once the entry is sent to courier
     customerName: row.customer_name,
     customerPhone: row.customer_phone,
     customerAddress: row.customer_address,
     amount: row.amount,
-    moderator: row.moderator,
-    status: row.status,
+    productCode: row.product_code,
     consignmentId: row.consignment_id,
     trackingCode: row.tracking_code,
     createdAt: row.created_at,
   };
+}
+
+// Uses Claude to read the moderator's free-form pasted message and pull out
+// exactly the fields Steadfast needs. Runs only when "Send to Courier" is
+// pressed — the moderator never sees or fills these fields directly.
+async function extractOrderInfo(rawText) {
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": process.env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 300,
+      system:
+        "You extract delivery-order details from a Bengali/English mixed message written by a shop moderator. " +
+        "The message may contain Bangla numerals (convert to normal digits), a product/order code, " +
+        "customer name, address, an 11-digit phone number starting with 01, and a bill/total amount " +
+        "(sometimes shown as a calculation like 2250+150=2400-500=1900 — use the FINAL result). " +
+        "Respond with ONLY raw JSON, no markdown fences, no explanation, in exactly this shape: " +
+        '{"recipient_name":"","recipient_phone":"","recipient_address":"","cod_amount":0,"invoice":""}. ' +
+        "If a field truly cannot be found, use an empty string (or 0 for cod_amount).",
+      messages: [{ role: "user", content: rawText }],
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Claude API error: ${response.status}`);
+  }
+  const data = await response.json();
+  const textBlock = data.content.find((b) => b.type === "text");
+  if (!textBlock) throw new Error("No text in Claude response");
+
+  const cleaned = textBlock.text.replace(/```json|```/g, "").trim();
+  return JSON.parse(cleaned);
 }
 
 // GET /api/entries — list all entries, newest first
@@ -37,39 +73,16 @@ router.get("/", async (req, res) => {
   }
 });
 
-// POST /api/entries — create a new entry
+// POST /api/entries — create a new entry (just the raw message + image)
 router.post("/", async (req, res) => {
-  const {
-    productCode,
-    imageUrl,
-    hata,
-    long,
-    tag,
-    customerName,
-    customerPhone,
-    customerAddress,
-    amount,
-    moderator,
-  } = req.body;
+  const { rawText, imageUrl, moderator } = req.body;
 
   try {
     const result = await pool.query(
-      `INSERT INTO entries
-        (product_code, image_url, hata, long_size, tag, customer_name, customer_phone, customer_address, amount, moderator)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+      `INSERT INTO entries (raw_text, image_url, moderator)
+       VALUES ($1, $2, $3)
        RETURNING *`,
-      [
-        productCode,
-        imageUrl,
-        hata,
-        long,
-        tag,
-        customerName,
-        customerPhone,
-        customerAddress,
-        amount,
-        moderator,
-      ]
+      [rawText, imageUrl, moderator]
     );
     res.status(201).json(toApiShape(result.rows[0]));
   } catch (err) {
@@ -78,23 +91,15 @@ router.post("/", async (req, res) => {
   }
 });
 
-// PUT /api/entries/:id — edit any field(s) of an entry
+// PUT /api/entries/:id — edit the raw message, image, or moderator
 router.put("/:id", async (req, res) => {
   const { id } = req.params;
   const fields = {
-    product_code: req.body.productCode,
+    raw_text: req.body.rawText,
     image_url: req.body.imageUrl,
-    hata: req.body.hata,
-    long_size: req.body.long,
-    tag: req.body.tag,
-    customer_name: req.body.customerName,
-    customer_phone: req.body.customerPhone,
-    customer_address: req.body.customerAddress,
-    amount: req.body.amount,
     moderator: req.body.moderator,
   };
 
-  // Only update fields that were actually sent
   const keys = Object.keys(fields).filter((k) => fields[k] !== undefined);
   if (keys.length === 0) {
     return res.status(400).json({ error: "No fields to update" });
@@ -138,7 +143,9 @@ router.delete("/:id", async (req, res) => {
   }
 });
 
-// POST /api/entries/:id/send-to-courier — creates the order on Steadfast
+// POST /api/entries/:id/send-to-courier
+// Reads the raw pasted message, asks Claude to extract the delivery fields
+// in the background, then creates the order on Steadfast.
 router.post("/:id/send-to-courier", async (req, res) => {
   const { id } = req.params;
 
@@ -152,9 +159,22 @@ router.post("/:id/send-to-courier", async (req, res) => {
     if (entry.status === "sent") {
       return res.status(400).json({ error: "Already sent to courier" });
     }
-    if (!entry.customer_name || !entry.customer_phone || !entry.customer_address) {
+    if (!entry.raw_text || !entry.raw_text.trim()) {
+      return res.status(400).json({ error: "No message text to read — add details first" });
+    }
+
+    let extracted;
+    try {
+      extracted = await extractOrderInfo(entry.raw_text);
+    } catch (err) {
+      console.error("Extraction failed:", err);
+      return res.status(502).json({ error: "AI could not read the message — check it manually" });
+    }
+
+    if (!extracted.recipient_phone || !extracted.recipient_address) {
       return res.status(400).json({
-        error: "Customer name, phone, and address are required before sending",
+        error: "AI couldn't find a phone number or address in the message",
+        details: extracted,
       });
     }
 
@@ -168,12 +188,11 @@ router.post("/:id/send-to-courier", async (req, res) => {
           "Secret-Key": process.env.STEADFAST_SECRET_KEY,
         },
         body: JSON.stringify({
-          invoice: entry.product_code || `ASBAB-${entry.id}`,
-          recipient_name: entry.customer_name,
-          recipient_phone: entry.customer_phone,
-          recipient_address: entry.customer_address,
-          cod_amount: entry.amount || 0,
-          note: entry.tag || "",
+          invoice: extracted.invoice || `ASBAB-${entry.id}`,
+          recipient_name: extracted.recipient_name || "N/A",
+          recipient_phone: extracted.recipient_phone,
+          recipient_address: extracted.recipient_address,
+          cod_amount: extracted.cod_amount || 0,
         }),
       }
     );
@@ -190,10 +209,26 @@ router.post("/:id/send-to-courier", async (req, res) => {
     const consignment = data.consignment;
     const updated = await pool.query(
       `UPDATE entries
-       SET status = 'sent', consignment_id = $1, tracking_code = $2
-       WHERE id = $3
+       SET status = 'sent',
+           consignment_id = $1,
+           tracking_code = $2,
+           customer_name = $3,
+           customer_phone = $4,
+           customer_address = $5,
+           amount = $6,
+           product_code = $7
+       WHERE id = $8
        RETURNING *`,
-      [consignment.consignment_id, consignment.tracking_code, id]
+      [
+        consignment.consignment_id,
+        consignment.tracking_code,
+        extracted.recipient_name,
+        extracted.recipient_phone,
+        extracted.recipient_address,
+        extracted.cod_amount,
+        extracted.invoice,
+        id,
+      ]
     );
 
     res.json(toApiShape(updated.rows[0]));
