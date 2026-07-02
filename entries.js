@@ -2,6 +2,7 @@
 const express = require("express");
 const router = express.Router();
 const pool = require("./db");
+const { randomUUID } = require("crypto");
 
 // Map a DB row to the shape the frontend expects.
 function toApiShape(row) {
@@ -11,6 +12,7 @@ function toApiShape(row) {
     imageUrl: row.image_url,
     moderator: row.moderator,
     group: row.group_name,
+    batchId: row.batch_id,
     status: row.status,
     // Filled in automatically by AI once the entry is sent to courier
     customerName: row.customer_name,
@@ -151,28 +153,29 @@ router.get("/", async (req, res) => {
 router.post("/", async (req, res) => {
   const { rawText, imageUrl, moderator, group } = req.body;
   const targetGroup = group || "pending";
+  const batchId = randomUUID();
 
   try {
     const result = await pool.query(
-      `INSERT INTO entries (raw_text, image_url, moderator, group_name)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO entries (raw_text, image_url, moderator, group_name, batch_id)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING *`,
-      [rawText, imageUrl, moderator, targetGroup]
+      [rawText, imageUrl, moderator, targetGroup, batchId]
     );
 
     if (targetGroup === "all_order") {
       await pool.query(
-        `INSERT INTO entries (raw_text, image_url, moderator, group_name)
-         VALUES ($1, $2, $3, 'pending')`,
-        [rawText, imageUrl, moderator]
+        `INSERT INTO entries (raw_text, image_url, moderator, group_name, batch_id)
+         VALUES ($1, $2, $3, 'pending', $4)`,
+        [rawText, imageUrl, moderator, batchId]
       );
 
       const makingText = buildMakingText(rawText);
       if (makingText) {
         await pool.query(
-          `INSERT INTO entries (raw_text, image_url, moderator, group_name)
-           VALUES ($1, $2, $3, 'making')`,
-          [makingText, imageUrl, moderator]
+          `INSERT INTO entries (raw_text, image_url, moderator, group_name, batch_id)
+           VALUES ($1, $2, $3, 'making', $4)`,
+          [makingText, imageUrl, moderator, batchId]
         );
       }
     }
@@ -220,20 +223,49 @@ router.put("/:id", async (req, res) => {
 // DELETE /api/entries/:id — removes from OUR database only.
 // This never touches Steadfast — an already-sent consignment stays exactly
 // as it is on their side even after we delete it here.
+// Special rule: deleting a Pending entry also deletes its matching Making
+// entry (same batch_id), since Making was auto-forwarded from it.
 router.delete("/:id", async (req, res) => {
   const { id } = req.params;
   try {
+    const existing = await pool.query("SELECT * FROM entries WHERE id = $1", [id]);
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: "Entry not found" });
+    }
+    const entry = existing.rows[0];
+
+    await pool.query("DELETE FROM entries WHERE id = $1", [id]);
+
+    if (entry.group_name === "pending" && entry.batch_id) {
+      await pool.query(
+        "DELETE FROM entries WHERE batch_id = $1 AND group_name = 'making'",
+        [entry.batch_id]
+      );
+    }
+
+    res.json({ deleted: true, id });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Could not delete entry" });
+  }
+});
+
+// POST /api/entries/:id/mark-done — used only by the Making group's
+// "Send Making" button. Just flips status to done; never touches Steadfast.
+router.post("/:id/mark-done", async (req, res) => {
+  const { id } = req.params;
+  try {
     const result = await pool.query(
-      "DELETE FROM entries WHERE id = $1 RETURNING id",
+      "UPDATE entries SET status = 'sent' WHERE id = $1 RETURNING *",
       [id]
     );
     if (result.rows.length === 0) {
       return res.status(404).json({ error: "Entry not found" });
     }
-    res.json({ deleted: true, id });
+    res.json(toApiShape(result.rows[0]));
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Could not delete entry" });
+    res.status(500).json({ error: "Could not update entry" });
   }
 });
 
