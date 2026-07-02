@@ -83,7 +83,7 @@ function buildMakingText(rawText) {
     }
   }
 
-  const longMatch = text.match(/long[:\s=-]*?(\d{2,3})/i);
+  const longMatch = text.match(/(?:long|size|সাইজ|লং|লম্বা)[:\s=-]*?(\d{2,3})/i);
   const long = longMatch ? longMatch[1] : null;
 
   let tag = null;
