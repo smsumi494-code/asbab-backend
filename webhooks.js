@@ -7,6 +7,38 @@ const router = express.Router();
 const crypto = require("crypto");
 const { createEntry } = require("./entries");
 
+// Fetches the featured image for each product in the order, using the
+// WooCommerce REST API (needs read-only API keys — see setup notes).
+// Skips gracefully (no image) if the keys aren't set or a lookup fails,
+// so a missing image never blocks the order from coming through.
+async function getProductImages(order) {
+  const siteUrl = process.env.WC_SITE_URL || "https://asbababaya.com";
+  const key = process.env.WC_CONSUMER_KEY;
+  const secret = process.env.WC_CONSUMER_SECRET;
+  if (!key || !secret) return [];
+
+  const authHeader = "Basic " + Buffer.from(`${key}:${secret}`).toString("base64");
+  const lineItems = order.line_items || [];
+
+  const images = await Promise.all(
+    lineItems.map(async (item) => {
+      if (!item.product_id) return null;
+      try {
+        const res = await fetch(`${siteUrl}/wp-json/wc/v3/products/${item.product_id}`, {
+          headers: { Authorization: authHeader },
+        });
+        if (!res.ok) return null;
+        const product = await res.json();
+        return product.images?.[0]?.src || null;
+      } catch {
+        return null;
+      }
+    })
+  );
+
+  return images.filter(Boolean);
+}
+
 // Converts a WooCommerce order object into the same kind of free-text
 // message a moderator would normally paste in.
 function buildRawTextFromOrder(order) {
@@ -59,7 +91,7 @@ router.post("/woocommerce", async (req, res) => {
 
   try {
     const rawText = buildRawTextFromOrder(req.body);
-    const imageUrls = []; // WooCommerce orders don't include a photo
+    const imageUrls = await getProductImages(req.body);
     await createEntry({ rawText, imageUrls, moderator: "ওয়েবসাইট", group: "all_order" });
     res.status(200).json({ ok: true });
   } catch (err) {
