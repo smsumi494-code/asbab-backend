@@ -164,7 +164,7 @@ function buildMakingText(rawText) {
   const sizeLine = lines.find((l) => /(long|size|সাইজ|লং|লম্বা)/i.test(l));
   const hataLine = lines.find((l) => /(হাতা|hata|sleeve)/i.test(l) && l !== sizeLine);
   const bodyLine = lines.find((l) => /(বডি\s*সাইজ|body\s*size)/i.test(l) && l !== sizeLine);
-  const quantityLines = lines.filter((l) => /\d+\s*(টা|পিস|piece)/i.test(l));
+  const quantityLines = lines.filter((l) => /\d+\s*(টা(?!কা)|পিস|piece)/i.test(l));
 
   const parts = [];
   if (orderLine) parts.push(`অর্ডার: ${orderLine}`);
