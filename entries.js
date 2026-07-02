@@ -152,47 +152,31 @@ function extractTags(rawText) {
   return tags;
 }
 
-// Builds the trimmed-down message that goes to the "Making" group:
-// order number, Long / হাতা সাইজ / বডি সাইজ (whichever are mentioned),
-// and any garment/inclusion tags.
+// Builds the trimmed-down message that goes to the "Making" group. Instead
+// of extracting single numbers (which loses info like "54/56" or "2 pieces
+// each"), this keeps whole lines that mention order numbers, sizes, or
+// quantities — so multi-item orders don't lose data.
 function buildMakingText(rawText) {
-  let text = toEnglishDigits(rawText);
+  const text = toEnglishDigits(rawText);
   const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
 
-  let orderNumber = null;
-  for (const line of lines) {
-    const m = line.match(/\b\d{4,6}\b/);
-    if (m) {
-      orderNumber = m[0];
-      break;
-    }
-  }
-
-  let hataSize = null;
-  const hataMatch = text.match(/(?:হাতা\s*সাইজ|হাতা|hata|sleeve)[:\s=-]*?(\d{1,3})/i);
-  if (hataMatch) {
-    hataSize = hataMatch[1];
-    text = text.replace(hataMatch[0], "");
-  }
-
-  let bodySize = null;
-  const bodyMatch = text.match(/(?:বডি\s*সাইজ|body\s*size)[:\s=-]*?(\d{1,3})/i);
-  if (bodyMatch) {
-    bodySize = bodyMatch[1];
-    text = text.replace(bodyMatch[0], "");
-  }
-
-  const longMatch = text.match(/(?:long|size|সাইজ|লং|লম্বা)[:\s=-]*?(\d{2,3})/i);
-  const long = longMatch ? longMatch[1] : null;
-
-  const tags = extractTags(rawText);
+  const orderLine = lines.find((l) => /\b\d{4,6}\b/.test(l));
+  const sizeLine = lines.find((l) => /(long|size|সাইজ|লং|লম্বা)/i.test(l));
+  const hataLine = lines.find((l) => /(হাতা|hata|sleeve)/i.test(l) && l !== sizeLine);
+  const bodyLine = lines.find((l) => /(বডি\s*সাইজ|body\s*size)/i.test(l) && l !== sizeLine);
+  const quantityLines = lines.filter((l) => /\d+\s*(টা|পিস|piece)/i.test(l));
 
   const parts = [];
-  if (orderNumber) parts.push(`অর্ডার নাম্বার: ${orderNumber}`);
-  if (long) parts.push(`Long: ${long}`);
-  if (hataSize) parts.push(`হাতা সাইজ: ${hataSize}`);
-  if (bodySize) parts.push(`বডি সাইজ: ${bodySize}`);
-  tags.forEach((t) => parts.push(t));
+  if (orderLine) parts.push(`অর্ডার: ${orderLine}`);
+  if (sizeLine) parts.push(sizeLine);
+  if (hataLine) parts.push(hataLine);
+  if (bodyLine) parts.push(bodyLine);
+
+  if (quantityLines.length) {
+    quantityLines.forEach((l) => parts.push(l));
+  } else {
+    extractTags(rawText).forEach((t) => parts.push(t));
+  }
 
   return parts.length ? parts.join("\n") : null;
 }
@@ -282,7 +266,55 @@ router.put("/:id", requireAuth, requireAdmin, async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ error: "Entry not found" });
     }
-    res.json(toApiShape(result.rows[0]));
+    const updated = result.rows[0];
+
+    // If this edit was made in "All Order", push the same changes down to
+    // its linked Pending copy, and a freshly-filtered version down to its
+    // linked Making copy — so all three stay in sync.
+    if (
+      updated.group_name === "all_order" &&
+      updated.batch_id &&
+      (req.body.rawText !== undefined || req.body.imageUrls !== undefined)
+    ) {
+      const pendingParts = [];
+      const pendingValues = [];
+      if (req.body.rawText !== undefined) {
+        pendingParts.push(`raw_text = $${pendingValues.length + 1}`);
+        pendingValues.push(req.body.rawText);
+      }
+      if (req.body.imageUrls !== undefined) {
+        pendingParts.push(`image_urls = $${pendingValues.length + 1}::jsonb`);
+        pendingValues.push(JSON.stringify(req.body.imageUrls));
+      }
+      if (pendingParts.length) {
+        await pool.query(
+          `UPDATE entries SET ${pendingParts.join(", ")} WHERE batch_id = $${pendingValues.length + 1} AND group_name = 'pending'`,
+          [...pendingValues, updated.batch_id]
+        );
+      }
+
+      const makingParts = [];
+      const makingValues = [];
+      if (req.body.rawText !== undefined) {
+        const makingText = buildMakingText(req.body.rawText);
+        if (makingText) {
+          makingParts.push(`raw_text = $${makingValues.length + 1}`);
+          makingValues.push(makingText);
+        }
+      }
+      if (req.body.imageUrls !== undefined) {
+        makingParts.push(`image_urls = $${makingValues.length + 1}::jsonb`);
+        makingValues.push(JSON.stringify(req.body.imageUrls));
+      }
+      if (makingParts.length) {
+        await pool.query(
+          `UPDATE entries SET ${makingParts.join(", ")} WHERE batch_id = $${makingValues.length + 1} AND group_name = 'making'`,
+          [...makingValues, updated.batch_id]
+        );
+      }
+    }
+
+    res.json(toApiShape(updated));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Could not update entry" });
