@@ -71,4 +71,14 @@ async function getCredential(type, provider) {
   return result.rows[0] || null;
 }
 
-module.exports = { router, getCredential };
+// Fetches whichever AI credential was saved most recently, regardless of
+// provider (Anthropic / OpenAI / Google). Used so entries.js can call
+// whichever one the Admin actually set up.
+async function getPreferredAiCredential() {
+  const result = await pool.query(
+    "SELECT provider, api_key, secret_key FROM api_credentials WHERE type = 'ai' ORDER BY created_at DESC LIMIT 1"
+  );
+  return result.rows[0] || null;
+}
+
+module.exports = { router, getCredential, getPreferredAiCredential };
