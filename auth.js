@@ -7,11 +7,44 @@ const jwt = require("jsonwebtoken");
 
 const JWT_SECRET = process.env.JWT_SECRET || "please-set-a-real-secret";
 
+// Simple in-memory brute-force guard: max 5 attempts per phone number per
+// 15 minutes. Resets automatically after the window passes.
+const loginAttempts = new Map();
+const MAX_ATTEMPTS = 5;
+const WINDOW_MS = 15 * 60 * 1000;
+
+function isRateLimited(phone) {
+  const record = loginAttempts.get(phone);
+  if (!record) return false;
+  if (Date.now() - record.first > WINDOW_MS) {
+    loginAttempts.delete(phone);
+    return false;
+  }
+  return record.count >= MAX_ATTEMPTS;
+}
+
+function recordFailedAttempt(phone) {
+  const record = loginAttempts.get(phone);
+  if (!record || Date.now() - record.first > WINDOW_MS) {
+    loginAttempts.set(phone, { count: 1, first: Date.now() });
+  } else {
+    record.count += 1;
+  }
+}
+
+function clearAttempts(phone) {
+  loginAttempts.delete(phone);
+}
+
 // POST /api/auth/login
 router.post("/login", async (req, res) => {
   const { phone, password } = req.body;
   if (!phone || !password) {
     return res.status(400).json({ error: "Phone and password required" });
+  }
+
+  if (isRateLimited(phone)) {
+    return res.status(429).json({ error: "Too many attempts. Try again in a few minutes." });
   }
 
   try {
@@ -42,6 +75,7 @@ router.post("/login", async (req, res) => {
         );
         user = created.rows[0];
       } else {
+        recordFailedAttempt(phone);
         return res.status(401).json({ error: "Invalid phone or password" });
       }
     } else {
@@ -50,9 +84,12 @@ router.post("/login", async (req, res) => {
       }
       const match = await bcrypt.compare(password, user.password_hash);
       if (!match) {
+        recordFailedAttempt(phone);
         return res.status(401).json({ error: "Invalid phone or password" });
       }
     }
+
+    clearAttempts(phone);
 
     const token = jwt.sign(
       { sub: user.id, role: user.role, name: user.name, phone: user.phone },
@@ -88,4 +125,11 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-module.exports = { router, requireAuth, requireAdmin };
+// Used by the SSE stream route, which can't send an Authorization header
+// (EventSource doesn't support custom headers), so the token comes as a
+// query parameter instead and is verified manually here.
+function verifyToken(token) {
+  return jwt.verify(token, JWT_SECRET);
+}
+
+module.exports = { router, requireAuth, requireAdmin, verifyToken };
