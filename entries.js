@@ -28,24 +28,52 @@ function toApiShape(row) {
   };
 }
 
-// Uses Claude to read the moderator's free-form pasted message and pull out
-// exactly the fields Steadfast needs. Runs only when "Send to Courier" is
-// pressed — the moderator never sees or fills these fields directly.
-const EXTRACTION_SYSTEM_PROMPT =
-  "You extract delivery-order details from a Bengali/English mixed message written by a shop moderator. " +
-  "The message may contain Bangla numerals (convert to normal digits), a product/order code, " +
-  "customer name, address, an 11-digit phone number starting with 01, and a bill/total amount " +
-  "(sometimes shown as a calculation like 2250+150=2400-500=1900 — use the FINAL result). " +
-  "Respond with ONLY raw JSON, no markdown fences, no explanation, in exactly this shape: " +
-  '{"recipient_name":"","recipient_phone":"","recipient_address":"","cod_amount":0,"invoice":""}. ' +
-  "If a field truly cannot be found, use an empty string (or 0 for cod_amount).";
+// ---- Generic AI calling (Gemini / OpenAI / Anthropic) --------------------
+// Used both for reading delivery details (Send to Courier) and for
+// building the Making group's production-only summary.
 
-function parseJsonReply(text) {
-  const cleaned = text.replace(/```json|```/g, "").trim();
-  return JSON.parse(cleaned);
+function stripJsonFences(text) {
+  return text.replace(/```json|```/g, "").trim();
 }
 
-async function extractWithAnthropic(rawText, apiKey) {
+async function callGemini(userText, systemPrompt, apiKey, wantJson) {
+  const body = {
+    contents: [{ parts: [{ text: `${systemPrompt}\n\nMessage:\n${userText}` }] }],
+  };
+  if (wantJson) body.generationConfig = { responseMimeType: "application/json" };
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+  );
+  if (!response.ok) throw new Error(`Gemini API error: ${response.status}`);
+  const data = await response.json();
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (text === undefined) throw new Error("No text in Gemini response");
+  return text;
+}
+
+async function callOpenAI(userText, systemPrompt, apiKey, wantJson) {
+  const body = {
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userText },
+    ],
+  };
+  if (wantJson) body.response_format = { type: "json_object" };
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) throw new Error(`OpenAI API error: ${response.status}`);
+  const data = await response.json();
+  const text = data.choices?.[0]?.message?.content;
+  if (!text) throw new Error("No text in OpenAI response");
+  return text;
+}
+
+async function callAnthropic(userText, systemPrompt, apiKey) {
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -56,74 +84,70 @@ async function extractWithAnthropic(rawText, apiKey) {
     body: JSON.stringify({
       model: "claude-haiku-4-5-20251001",
       max_tokens: 300,
-      system: EXTRACTION_SYSTEM_PROMPT,
-      messages: [{ role: "user", content: rawText }],
+      system: systemPrompt,
+      messages: [{ role: "user", content: userText }],
     }),
   });
   if (!response.ok) throw new Error(`Anthropic API error: ${response.status}`);
   const data = await response.json();
   const textBlock = data.content.find((b) => b.type === "text");
   if (!textBlock) throw new Error("No text in Anthropic response");
-  return parseJsonReply(textBlock.text);
+  return textBlock.text;
 }
 
-async function extractWithGemini(rawText, apiKey) {
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: `${EXTRACTION_SYSTEM_PROMPT}\n\nMessage:\n${rawText}` }] }],
-        generationConfig: { responseMimeType: "application/json" },
-      }),
-    }
-  );
-  if (!response.ok) throw new Error(`Gemini API error: ${response.status}`);
-  const data = await response.json();
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) throw new Error("No text in Gemini response");
-  return parseJsonReply(text);
-}
-
-async function extractWithOpenAI(rawText, apiKey) {
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: EXTRACTION_SYSTEM_PROMPT },
-        { role: "user", content: rawText },
-      ],
-    }),
-  });
-  if (!response.ok) throw new Error(`OpenAI API error: ${response.status}`);
-  const data = await response.json();
-  const text = data.choices?.[0]?.message?.content;
-  if (!text) throw new Error("No text in OpenAI response");
-  return parseJsonReply(text);
-}
-
-// Uses whichever AI the Admin has configured in Settings (Gemini, OpenAI,
-// or Anthropic) to read the moderator's free-form pasted message and pull
-// out exactly the fields Steadfast needs. Runs only when "Send to Courier"
-// is pressed — the moderator never sees or fills these fields directly.
-async function extractOrderInfo(rawText) {
+// Routes to whichever AI the Admin configured in Settings (falls back to
+// the ANTHROPIC_API_KEY env var if nothing is saved).
+async function callAI(userText, systemPrompt, { json = false } = {}) {
   const saved = await getPreferredAiCredential();
-
+  let raw;
   if (saved?.provider === "google") {
-    return extractWithGemini(rawText, saved.api_key);
+    raw = await callGemini(userText, systemPrompt, saved.api_key, json);
+  } else if (saved?.provider === "openai") {
+    raw = await callOpenAI(userText, systemPrompt, saved.api_key, json);
+  } else {
+    const anthropicKey = saved?.provider === "anthropic" ? saved.api_key : process.env.ANTHROPIC_API_KEY;
+    raw = await callAnthropic(userText, systemPrompt, anthropicKey);
   }
-  if (saved?.provider === "openai") {
-    return extractWithOpenAI(rawText, saved.api_key);
-  }
-  const anthropicKey = saved?.provider === "anthropic" ? saved.api_key : process.env.ANTHROPIC_API_KEY;
-  return extractWithAnthropic(rawText, anthropicKey);
+  return json ? JSON.parse(stripJsonFences(raw)) : raw.trim();
+}
+
+// Reads the moderator's free-form pasted message and pulls out exactly the
+// fields Steadfast needs. Runs only when "Send to Courier" is pressed —
+// the moderator never sees or fills these fields directly.
+const EXTRACTION_SYSTEM_PROMPT =
+  "You extract delivery-order details from a Bengali/English mixed message written by a shop moderator. " +
+  "The message may contain Bangla numerals (convert to normal digits), a product/order code, " +
+  "customer name, address, an 11-digit phone number starting with 01, and a bill/total amount " +
+  "(sometimes shown as a calculation like 2250+150=2400-500=1900 — use the FINAL result). " +
+  "Respond with ONLY raw JSON, no markdown fences, no explanation, in exactly this shape: " +
+  '{"recipient_name":"","recipient_phone":"","recipient_address":"","cod_amount":0,"invoice":""}. ' +
+  "If a field truly cannot be found, use an empty string (or 0 for cod_amount).";
+
+async function extractOrderInfo(rawText) {
+  return callAI(rawText, EXTRACTION_SYSTEM_PROMPT, { json: true });
+}
+
+// Reads the same message but pulls out ONLY what the Making (production)
+// team needs: order number(s) exactly as written, size/measurement lines
+// exactly as written (so combos like "54/56" or "2 pieces each" survive),
+// and garment/quantity details. Customer name, phone, address, and price
+// are deliberately excluded — production doesn't need them.
+const MAKING_SYSTEM_PROMPT =
+  "You read a Bengali/English shop order message and extract ONLY the details a garment-making/production " +
+  "team needs — nothing about the customer or the price. Include, each on its own line, exactly as written " +
+  "in the original message (keep Bangla text as Bangla): " +
+  "1) the order number(s) (e.g. '7425' or '7425/7426'), " +
+  "2) any Long/size measurements, preserving multiple values exactly (e.g. '54/56', not just '54'), " +
+  "3) any হাতা (sleeve) or বডি (body) size if separately mentioned, " +
+  "4) quantity and garment-type details (e.g. '2 pieces Borka, 2 Niqab', 'এক পিস বোরকা হিজাব সহ', 'ফুল সেট'). " +
+  "STRICTLY EXCLUDE: customer name, phone number, address, and any bill/price/টাকা amount — even if a number " +
+  "near a size looks like it could be a price, only include it if it is clearly a measurement or quantity, never " +
+  "a currency amount. If nothing relevant is found, respond with an empty string. " +
+  "Respond with ONLY the extracted lines as plain text — no JSON, no markdown, no explanation.";
+
+async function extractMakingInfo(rawText) {
+  const text = await callAI(rawText, MAKING_SYSTEM_PROMPT, { json: false });
+  return text && text.length ? text : null;
 }
 
 // Converts Bangla digits (০-৯) to normal digits so regex matching works.
@@ -218,7 +242,13 @@ router.post("/", requireAuth, async (req, res) => {
         [rawText, images, moderator, batchId]
       );
 
-      const makingText = buildMakingText(rawText);
+      let makingText;
+      try {
+        makingText = await extractMakingInfo(rawText);
+      } catch (err) {
+        console.error("Making-group AI extraction failed, using fallback:", err);
+        makingText = buildMakingText(rawText);
+      }
       if (makingText) {
         await pool.query(
           `INSERT INTO entries (raw_text, image_urls, moderator, group_name, batch_id)
@@ -296,7 +326,13 @@ router.put("/:id", requireAuth, requireAdmin, async (req, res) => {
       const makingParts = [];
       const makingValues = [];
       if (req.body.rawText !== undefined) {
-        const makingText = buildMakingText(req.body.rawText);
+        let makingText;
+        try {
+          makingText = await extractMakingInfo(req.body.rawText);
+        } catch (err) {
+          console.error("Making-group AI extraction failed, using fallback:", err);
+          makingText = buildMakingText(req.body.rawText);
+        }
         if (makingText) {
           makingParts.push(`raw_text = $${makingValues.length + 1}`);
           makingValues.push(makingText);
