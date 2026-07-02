@@ -61,6 +61,44 @@ async function extractOrderInfo(rawText) {
   return JSON.parse(cleaned);
 }
 
+// Converts Bangla digits (০-৯) to normal digits so regex matching works.
+function toEnglishDigits(str) {
+  const map = { "০": "0", "১": "1", "২": "2", "৩": "3", "৪": "4", "৫": "5", "৬": "6", "৭": "7", "৮": "8", "৯": "9" };
+  return str.replace(/[০-৯]/g, (d) => map[d]);
+}
+
+// Builds the trimmed-down message that goes to the "Making" group:
+// just the order number, the Long size, and whichever piece-type tag
+// (এক পিস বোরকা / হিজাব সহ / ফুল সেট) is mentioned, if any.
+function buildMakingText(rawText) {
+  const text = toEnglishDigits(rawText);
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+
+  let orderNumber = null;
+  for (const line of lines) {
+    const m = line.match(/\b\d{4,6}\b/);
+    if (m) {
+      orderNumber = m[0];
+      break;
+    }
+  }
+
+  const longMatch = text.match(/long[:\s=-]*?(\d{2,3})/i);
+  const long = longMatch ? longMatch[1] : null;
+
+  let tag = null;
+  if (/এক\s*পিস\s*বোরকা/.test(rawText)) tag = "এক পিস বোরকা";
+  else if (/হিজাব\s*সহ/.test(rawText)) tag = "হিজাব সহ";
+  else if (/ফুল\s*সেট/.test(rawText)) tag = "ফুল সেট";
+
+  const parts = [];
+  if (orderNumber) parts.push(`অর্ডার নাম্বার: ${orderNumber}`);
+  if (long) parts.push(`Long: ${long}`);
+  if (tag) parts.push(tag);
+
+  return parts.length ? parts.join("\n") : null;
+}
+
 // GET /api/entries — list all entries, newest first
 router.get("/", async (req, res) => {
   try {
@@ -76,7 +114,9 @@ router.get("/", async (req, res) => {
 
 // POST /api/entries — create a new entry (just the raw message + image)
 // Special rule: anything posted to "All Order" is automatically forwarded
-// (as its own copy, with the same image) into "Pending" too.
+// (as its own copy, with the same image) into "Pending" too, and a
+// trimmed-down copy (order number, Long, piece-type tag + image) goes to
+// "Making".
 router.post("/", async (req, res) => {
   const { rawText, imageUrl, moderator, group } = req.body;
   const targetGroup = group || "pending";
@@ -95,6 +135,15 @@ router.post("/", async (req, res) => {
          VALUES ($1, $2, $3, 'pending')`,
         [rawText, imageUrl, moderator]
       );
+
+      const makingText = buildMakingText(rawText);
+      if (makingText) {
+        await pool.query(
+          `INSERT INTO entries (raw_text, image_url, moderator, group_name)
+           VALUES ($1, $2, $3, 'making')`,
+          [makingText, imageUrl, moderator]
+        );
+      }
     }
 
     res.status(201).json(toApiShape(result.rows[0]));
