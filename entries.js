@@ -11,7 +11,7 @@ function toApiShape(row) {
   return {
     id: row.id,
     rawText: row.raw_text,
-    imageUrl: row.image_url,
+    imageUrls: row.image_urls && row.image_urls.length ? row.image_urls : row.image_url ? [row.image_url] : [],
     moderator: row.moderator,
     group: row.group_name,
     batchId: row.batch_id,
@@ -214,31 +214,32 @@ router.get("/", requireAuth, async (req, res) => {
 // Special rule: anything posted to "All Order" is automatically forwarded
 // (as its own copy, with the same image) into "Pending" too.
 router.post("/", requireAuth, async (req, res) => {
-  const { rawText, imageUrl, moderator, group } = req.body;
+  const { rawText, imageUrls, moderator, group } = req.body;
   const targetGroup = group || "pending";
   const batchId = randomUUID();
+  const images = JSON.stringify(imageUrls || []);
 
   try {
     const result = await pool.query(
-      `INSERT INTO entries (raw_text, image_url, moderator, group_name, batch_id)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO entries (raw_text, image_urls, moderator, group_name, batch_id)
+       VALUES ($1, $2::jsonb, $3, $4, $5)
        RETURNING *`,
-      [rawText, imageUrl, moderator, targetGroup, batchId]
+      [rawText, images, moderator, targetGroup, batchId]
     );
 
     if (targetGroup === "all_order") {
       await pool.query(
-        `INSERT INTO entries (raw_text, image_url, moderator, group_name, batch_id)
-         VALUES ($1, $2, $3, 'pending', $4)`,
-        [rawText, imageUrl, moderator, batchId]
+        `INSERT INTO entries (raw_text, image_urls, moderator, group_name, batch_id)
+         VALUES ($1, $2::jsonb, $3, 'pending', $4)`,
+        [rawText, images, moderator, batchId]
       );
 
       const makingText = buildMakingText(rawText);
       if (makingText) {
         await pool.query(
-          `INSERT INTO entries (raw_text, image_url, moderator, group_name, batch_id)
-           VALUES ($1, $2, $3, 'making', $4)`,
-          [makingText, imageUrl, moderator, batchId]
+          `INSERT INTO entries (raw_text, image_urls, moderator, group_name, batch_id)
+           VALUES ($1, $2::jsonb, $3, 'making', $4)`,
+          [makingText, images, moderator, batchId]
         );
       }
     }
@@ -256,22 +257,26 @@ router.put("/:id", requireAuth, requireAdmin, async (req, res) => {
   const { id } = req.params;
   const fields = {
     raw_text: req.body.rawText,
-    image_url: req.body.imageUrl,
     moderator: req.body.moderator,
     group_name: req.body.group,
   };
 
   const keys = Object.keys(fields).filter((k) => fields[k] !== undefined);
-  if (keys.length === 0) {
+  const setParts = keys.map((k, i) => `${k} = $${i + 1}`);
+  const values = keys.map((k) => fields[k]);
+
+  if (req.body.imageUrls !== undefined) {
+    setParts.push(`image_urls = $${values.length + 1}::jsonb`);
+    values.push(JSON.stringify(req.body.imageUrls));
+  }
+
+  if (setParts.length === 0) {
     return res.status(400).json({ error: "No fields to update" });
   }
 
-  const setClause = keys.map((k, i) => `${k} = $${i + 1}`).join(", ");
-  const values = keys.map((k) => fields[k]);
-
   try {
     const result = await pool.query(
-      `UPDATE entries SET ${setClause} WHERE id = $${keys.length + 1} RETURNING *`,
+      `UPDATE entries SET ${setParts.join(", ")} WHERE id = $${values.length + 1} RETURNING *`,
       [...values, id]
     );
     if (result.rows.length === 0) {
