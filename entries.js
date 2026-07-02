@@ -4,7 +4,7 @@ const router = express.Router();
 const pool = require("./db");
 const { randomUUID } = require("crypto");
 const { requireAuth, requireAdmin } = require("./auth");
-const { getCredential } = require("./settings");
+const { getCredential, getPreferredAiCredential } = require("./settings");
 
 // Map a DB row to the shape the frontend expects.
 function toApiShape(row) {
@@ -31,10 +31,21 @@ function toApiShape(row) {
 // Uses Claude to read the moderator's free-form pasted message and pull out
 // exactly the fields Steadfast needs. Runs only when "Send to Courier" is
 // pressed — the moderator never sees or fills these fields directly.
-async function extractOrderInfo(rawText) {
-  const saved = await getCredential("ai", "anthropic");
-  const apiKey = saved?.api_key || process.env.ANTHROPIC_API_KEY;
+const EXTRACTION_SYSTEM_PROMPT =
+  "You extract delivery-order details from a Bengali/English mixed message written by a shop moderator. " +
+  "The message may contain Bangla numerals (convert to normal digits), a product/order code, " +
+  "customer name, address, an 11-digit phone number starting with 01, and a bill/total amount " +
+  "(sometimes shown as a calculation like 2250+150=2400-500=1900 — use the FINAL result). " +
+  "Respond with ONLY raw JSON, no markdown fences, no explanation, in exactly this shape: " +
+  '{"recipient_name":"","recipient_phone":"","recipient_address":"","cod_amount":0,"invoice":""}. ' +
+  "If a field truly cannot be found, use an empty string (or 0 for cod_amount).";
 
+function parseJsonReply(text) {
+  const cleaned = text.replace(/```json|```/g, "").trim();
+  return JSON.parse(cleaned);
+}
+
+async function extractWithAnthropic(rawText, apiKey) {
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -45,27 +56,74 @@ async function extractOrderInfo(rawText) {
     body: JSON.stringify({
       model: "claude-haiku-4-5-20251001",
       max_tokens: 300,
-      system:
-        "You extract delivery-order details from a Bengali/English mixed message written by a shop moderator. " +
-        "The message may contain Bangla numerals (convert to normal digits), a product/order code, " +
-        "customer name, address, an 11-digit phone number starting with 01, and a bill/total amount " +
-        "(sometimes shown as a calculation like 2250+150=2400-500=1900 — use the FINAL result). " +
-        "Respond with ONLY raw JSON, no markdown fences, no explanation, in exactly this shape: " +
-        '{"recipient_name":"","recipient_phone":"","recipient_address":"","cod_amount":0,"invoice":""}. ' +
-        "If a field truly cannot be found, use an empty string (or 0 for cod_amount).",
+      system: EXTRACTION_SYSTEM_PROMPT,
       messages: [{ role: "user", content: rawText }],
     }),
   });
-
-  if (!response.ok) {
-    throw new Error(`Claude API error: ${response.status}`);
-  }
+  if (!response.ok) throw new Error(`Anthropic API error: ${response.status}`);
   const data = await response.json();
   const textBlock = data.content.find((b) => b.type === "text");
-  if (!textBlock) throw new Error("No text in Claude response");
+  if (!textBlock) throw new Error("No text in Anthropic response");
+  return parseJsonReply(textBlock.text);
+}
 
-  const cleaned = textBlock.text.replace(/```json|```/g, "").trim();
-  return JSON.parse(cleaned);
+async function extractWithGemini(rawText, apiKey) {
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: `${EXTRACTION_SYSTEM_PROMPT}\n\nMessage:\n${rawText}` }] }],
+        generationConfig: { responseMimeType: "application/json" },
+      }),
+    }
+  );
+  if (!response.ok) throw new Error(`Gemini API error: ${response.status}`);
+  const data = await response.json();
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) throw new Error("No text in Gemini response");
+  return parseJsonReply(text);
+}
+
+async function extractWithOpenAI(rawText, apiKey) {
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: EXTRACTION_SYSTEM_PROMPT },
+        { role: "user", content: rawText },
+      ],
+    }),
+  });
+  if (!response.ok) throw new Error(`OpenAI API error: ${response.status}`);
+  const data = await response.json();
+  const text = data.choices?.[0]?.message?.content;
+  if (!text) throw new Error("No text in OpenAI response");
+  return parseJsonReply(text);
+}
+
+// Uses whichever AI the Admin has configured in Settings (Gemini, OpenAI,
+// or Anthropic) to read the moderator's free-form pasted message and pull
+// out exactly the fields Steadfast needs. Runs only when "Send to Courier"
+// is pressed — the moderator never sees or fills these fields directly.
+async function extractOrderInfo(rawText) {
+  const saved = await getPreferredAiCredential();
+
+  if (saved?.provider === "google") {
+    return extractWithGemini(rawText, saved.api_key);
+  }
+  if (saved?.provider === "openai") {
+    return extractWithOpenAI(rawText, saved.api_key);
+  }
+  const anthropicKey = saved?.provider === "anthropic" ? saved.api_key : process.env.ANTHROPIC_API_KEY;
+  return extractWithAnthropic(rawText, anthropicKey);
 }
 
 // Converts Bangla digits (০-৯) to normal digits so regex matching works.
