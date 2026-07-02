@@ -10,6 +10,7 @@ function toApiShape(row) {
     rawText: row.raw_text,
     imageUrl: row.image_url,
     moderator: row.moderator,
+    group: row.group_name,
     status: row.status,
     // Filled in automatically by AI once the entry is sent to courier
     customerName: row.customer_name,
@@ -75,14 +76,14 @@ router.get("/", async (req, res) => {
 
 // POST /api/entries — create a new entry (just the raw message + image)
 router.post("/", async (req, res) => {
-  const { rawText, imageUrl, moderator } = req.body;
+  const { rawText, imageUrl, moderator, group } = req.body;
 
   try {
     const result = await pool.query(
-      `INSERT INTO entries (raw_text, image_url, moderator)
-       VALUES ($1, $2, $3)
+      `INSERT INTO entries (raw_text, image_url, moderator, group_name)
+       VALUES ($1, $2, $3, $4)
        RETURNING *`,
-      [rawText, imageUrl, moderator]
+      [rawText, imageUrl, moderator, group || "pending"]
     );
     res.status(201).json(toApiShape(result.rows[0]));
   } catch (err) {
@@ -98,6 +99,7 @@ router.put("/:id", async (req, res) => {
     raw_text: req.body.rawText,
     image_url: req.body.imageUrl,
     moderator: req.body.moderator,
+    group_name: req.body.group,
   };
 
   const keys = Object.keys(fields).filter((k) => fields[k] !== undefined);
