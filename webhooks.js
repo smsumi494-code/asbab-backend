@@ -39,6 +39,24 @@ async function getProductImages(order) {
   return images.filter(Boolean);
 }
 
+// Your checkout page has a custom field ("বোরকার লং") where the customer
+// types their size — WooCommerce stores this in the order's meta_data.
+// This pulls it out (matching loosely on the label/key so small wording
+// changes on the site don't break it).
+function extractCustomFields(order) {
+  const keywords = ["লং", "size", "সাইজ"];
+  const lines = [];
+  for (const meta of order.meta_data || []) {
+    const label = meta.display_key || meta.key || "";
+    const value = meta.display_value ?? meta.value;
+    if (!value) continue;
+    if (keywords.some((k) => label.toLowerCase().includes(k.toLowerCase()))) {
+      lines.push(`বোরকার লং: ${value}`);
+    }
+  }
+  return lines;
+}
+
 // Converts a WooCommerce order object into the same kind of free-text
 // message a moderator would normally paste in.
 function buildRawTextFromOrder(order) {
@@ -53,6 +71,8 @@ function buildRawTextFromOrder(order) {
     .map((item) => `${item.name} x${item.quantity}`)
     .join("\n");
 
+  const customFields = extractCustomFields(order);
+
   const lines = [
     `Order #${order.number || order.id}`,
     name,
@@ -60,6 +80,7 @@ function buildRawTextFromOrder(order) {
     address ? `Address: ${address}` : null,
     "",
     items || null,
+    ...customFields,
     "",
     `বিল: ${order.total} টাকা`,
   ].filter((l) => l !== null);
