@@ -67,11 +67,31 @@ function toEnglishDigits(str) {
   return str.replace(/[০-৯]/g, (d) => map[d]);
 }
 
+// Detects which garment/inclusion words are mentioned — any combination
+// can appear together (e.g. "এক পিস বোরকা + হিজাব").
+function extractTags(rawText) {
+  const tags = [];
+  let borkaConsumed = false;
+
+  if (/এক\s*পিস\s*বোরকা/.test(rawText)) {
+    tags.push("এক পিস বোরকা");
+    borkaConsumed = true;
+  }
+  if (/ফুল\s*সেট/.test(rawText)) tags.push("ফুল সেট");
+  if (/আবায়া/.test(rawText)) tags.push("আবায়া");
+  if (/হিজাব/.test(rawText)) tags.push("হিজাব সহ");
+  if (/নিকাব/.test(rawText)) tags.push("নিকাব সহ");
+  if (/ইনার/.test(rawText)) tags.push("ইনার সহ");
+  if (!borkaConsumed && /বোরকা/.test(rawText)) tags.push("বোরকা");
+
+  return tags;
+}
+
 // Builds the trimmed-down message that goes to the "Making" group:
-// just the order number, the Long size, and whichever piece-type tag
-// (এক পিস বোরকা / হিজাব সহ / ফুল সেট) is mentioned, if any.
+// order number, Long / হাতা সাইজ / বডি সাইজ (whichever are mentioned),
+// and any garment/inclusion tags.
 function buildMakingText(rawText) {
-  const text = toEnglishDigits(rawText);
+  let text = toEnglishDigits(rawText);
   const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
 
   let orderNumber = null;
@@ -83,18 +103,31 @@ function buildMakingText(rawText) {
     }
   }
 
+  let hataSize = null;
+  const hataMatch = text.match(/(?:হাতা\s*সাইজ|হাতা|hata|sleeve)[:\s=-]*?(\d{1,3})/i);
+  if (hataMatch) {
+    hataSize = hataMatch[1];
+    text = text.replace(hataMatch[0], "");
+  }
+
+  let bodySize = null;
+  const bodyMatch = text.match(/(?:বডি\s*সাইজ|body\s*size)[:\s=-]*?(\d{1,3})/i);
+  if (bodyMatch) {
+    bodySize = bodyMatch[1];
+    text = text.replace(bodyMatch[0], "");
+  }
+
   const longMatch = text.match(/(?:long|size|সাইজ|লং|লম্বা)[:\s=-]*?(\d{2,3})/i);
   const long = longMatch ? longMatch[1] : null;
 
-  let tag = null;
-  if (/এক\s*পিস\s*বোরকা/.test(rawText)) tag = "এক পিস বোরকা";
-  else if (/হিজাব\s*সহ/.test(rawText)) tag = "হিজাব সহ";
-  else if (/ফুল\s*সেট/.test(rawText)) tag = "ফুল সেট";
+  const tags = extractTags(rawText);
 
   const parts = [];
   if (orderNumber) parts.push(`অর্ডার নাম্বার: ${orderNumber}`);
   if (long) parts.push(`Long: ${long}`);
-  if (tag) parts.push(tag);
+  if (hataSize) parts.push(`হাতা সাইজ: ${hataSize}`);
+  if (bodySize) parts.push(`বডি সাইজ: ${bodySize}`);
+  tags.forEach((t) => parts.push(t));
 
   return parts.length ? parts.join("\n") : null;
 }
@@ -114,9 +147,7 @@ router.get("/", async (req, res) => {
 
 // POST /api/entries — create a new entry (just the raw message + image)
 // Special rule: anything posted to "All Order" is automatically forwarded
-// (as its own copy, with the same image) into "Pending" too, and a
-// trimmed-down copy (order number, Long, piece-type tag + image) goes to
-// "Making".
+// (as its own copy, with the same image) into "Pending" too.
 router.post("/", async (req, res) => {
   const { rawText, imageUrl, moderator, group } = req.body;
   const targetGroup = group || "pending";
