@@ -368,6 +368,34 @@ router.post("/:id/send-to-courier", requireAuth, requireAdmin, async (req, res) 
       ]
     );
 
+    // Mirror the same result onto the linked "All Order" copy (same
+    // batch_id) so it shows the parcel ID/amount too instead of staying
+    // stuck on "waiting for courier send".
+    if (entry.group_name === "pending" && entry.batch_id) {
+      await pool.query(
+        `UPDATE entries
+         SET status = 'sent',
+             consignment_id = $1,
+             tracking_code = $2,
+             customer_name = $3,
+             customer_phone = $4,
+             customer_address = $5,
+             amount = $6,
+             product_code = $7
+         WHERE batch_id = $8 AND group_name = 'all_order'`,
+        [
+          consignment.consignment_id,
+          consignment.tracking_code,
+          extracted.recipient_name,
+          extracted.recipient_phone,
+          extracted.recipient_address,
+          extracted.cod_amount,
+          extracted.invoice,
+          entry.batch_id,
+        ]
+      );
+    }
+
     res.json(toApiShape(updated.rows[0]));
   } catch (err) {
     console.error(err);
