@@ -44,14 +44,22 @@ async function getProductImages(order) {
 // This pulls it out (matching loosely on the label/key so small wording
 // changes on the site don't break it).
 function extractCustomFields(order) {
-  console.log("ORDER META_DATA:", JSON.stringify(order.meta_data, null, 2));
   const keywords = ["লং", "size", "সাইজ"];
+  // Checkout Field Editor turns a Bengali field label into a meta key by
+  // slugifying it — Bengali characters can't be transliterated, so they
+  // get stripped down to just underscores. That's why "বোরকার লং" ends up
+  // as a key like "_billing____________" with no readable text at all.
+  // This regex catches that pattern directly since keyword matching can't.
+  const underscoreOnlyBillingKey = /^_billing_+$/;
+
   const lines = [];
   for (const meta of order.meta_data || []) {
     const label = meta.display_key || meta.key || "";
     const value = meta.display_value ?? meta.value;
     if (!value) continue;
-    if (keywords.some((k) => label.toLowerCase().includes(k.toLowerCase()))) {
+    const isKeywordMatch = keywords.some((k) => label.toLowerCase().includes(k.toLowerCase()));
+    const isUnderscoreBillingField = underscoreOnlyBillingKey.test(meta.key || "");
+    if (isKeywordMatch || isUnderscoreBillingField) {
       lines.push(`বোরকার লং: ${value}`);
     }
   }
