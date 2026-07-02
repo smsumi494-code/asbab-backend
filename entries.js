@@ -75,16 +75,28 @@ router.get("/", async (req, res) => {
 });
 
 // POST /api/entries — create a new entry (just the raw message + image)
+// Special rule: anything posted to "All Order" is automatically forwarded
+// (as its own copy, with the same image) into "Pending" too.
 router.post("/", async (req, res) => {
   const { rawText, imageUrl, moderator, group } = req.body;
+  const targetGroup = group || "pending";
 
   try {
     const result = await pool.query(
       `INSERT INTO entries (raw_text, image_url, moderator, group_name)
        VALUES ($1, $2, $3, $4)
        RETURNING *`,
-      [rawText, imageUrl, moderator, group || "pending"]
+      [rawText, imageUrl, moderator, targetGroup]
     );
+
+    if (targetGroup === "all_order") {
+      await pool.query(
+        `INSERT INTO entries (raw_text, image_url, moderator, group_name)
+         VALUES ($1, $2, $3, 'pending')`,
+        [rawText, imageUrl, moderator]
+      );
+    }
+
     res.status(201).json(toApiShape(result.rows[0]));
   } catch (err) {
     console.error(err);
