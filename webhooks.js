@@ -44,6 +44,7 @@ async function getProductImages(order) {
 // This pulls it out (matching loosely on the label/key so small wording
 // changes on the site don't break it).
 function extractCustomFields(order) {
+  console.log("ORDER META_DATA:", JSON.stringify(order.meta_data, null, 2));
   const keywords = ["লং", "size", "সাইজ"];
   const lines = [];
   for (const meta of order.meta_data || []) {
