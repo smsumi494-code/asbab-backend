@@ -3,6 +3,8 @@ const express = require("express");
 const router = express.Router();
 const pool = require("./db");
 const { randomUUID } = require("crypto");
+const { requireAuth, requireAdmin } = require("./auth");
+const { getCredential } = require("./settings");
 
 // Map a DB row to the shape the frontend expects.
 function toApiShape(row) {
@@ -30,11 +32,14 @@ function toApiShape(row) {
 // exactly the fields Steadfast needs. Runs only when "Send to Courier" is
 // pressed — the moderator never sees or fills these fields directly.
 async function extractOrderInfo(rawText) {
+  const saved = await getCredential("ai", "anthropic");
+  const apiKey = saved?.api_key || process.env.ANTHROPIC_API_KEY;
+
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "x-api-key": process.env.ANTHROPIC_API_KEY,
+      "x-api-key": apiKey,
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
@@ -134,8 +139,8 @@ function buildMakingText(rawText) {
   return parts.length ? parts.join("\n") : null;
 }
 
-// GET /api/entries — list all entries, newest first
-router.get("/", async (req, res) => {
+// GET /api/entries — list all entries, newest first (any logged-in user)
+router.get("/", requireAuth, async (req, res) => {
   try {
     const result = await pool.query(
       "SELECT * FROM entries ORDER BY created_at DESC"
@@ -147,10 +152,10 @@ router.get("/", async (req, res) => {
   }
 });
 
-// POST /api/entries — create a new entry (just the raw message + image)
+// POST /api/entries — create a new entry (Admin AND Moderator can post)
 // Special rule: anything posted to "All Order" is automatically forwarded
 // (as its own copy, with the same image) into "Pending" too.
-router.post("/", async (req, res) => {
+router.post("/", requireAuth, async (req, res) => {
   const { rawText, imageUrl, moderator, group } = req.body;
   const targetGroup = group || "pending";
   const batchId = randomUUID();
@@ -188,7 +193,8 @@ router.post("/", async (req, res) => {
 });
 
 // PUT /api/entries/:id — edit the raw message, image, or moderator
-router.put("/:id", async (req, res) => {
+// (Admin only — moderators cannot edit)
+router.put("/:id", requireAuth, requireAdmin, async (req, res) => {
   const { id } = req.params;
   const fields = {
     raw_text: req.body.rawText,
@@ -220,12 +226,12 @@ router.put("/:id", async (req, res) => {
   }
 });
 
-// DELETE /api/entries/:id — removes from OUR database only.
+// DELETE /api/entries/:id — removes from OUR database only (Admin only).
 // This never touches Steadfast — an already-sent consignment stays exactly
 // as it is on their side even after we delete it here.
 // Special rule: deleting a Pending entry also deletes its matching Making
 // entry (same batch_id), since Making was auto-forwarded from it.
-router.delete("/:id", async (req, res) => {
+router.delete("/:id", requireAuth, requireAdmin, async (req, res) => {
   const { id } = req.params;
   try {
     const existing = await pool.query("SELECT * FROM entries WHERE id = $1", [id]);
@@ -251,8 +257,9 @@ router.delete("/:id", async (req, res) => {
 });
 
 // POST /api/entries/:id/mark-done — used only by the Making group's
-// "Send Making" button. Just flips status to done; never touches Steadfast.
-router.post("/:id/mark-done", async (req, res) => {
+// "Send Making" button (Admin only). Just flips status to done; never
+// touches Steadfast.
+router.post("/:id/mark-done", requireAuth, requireAdmin, async (req, res) => {
   const { id } = req.params;
   try {
     const result = await pool.query(
@@ -269,10 +276,10 @@ router.post("/:id/mark-done", async (req, res) => {
   }
 });
 
-// POST /api/entries/:id/send-to-courier
+// POST /api/entries/:id/send-to-courier (Admin only)
 // Reads the raw pasted message, asks Claude to extract the delivery fields
 // in the background, then creates the order on Steadfast.
-router.post("/:id/send-to-courier", async (req, res) => {
+router.post("/:id/send-to-courier", requireAuth, requireAdmin, async (req, res) => {
   const { id } = req.params;
 
   try {
@@ -304,14 +311,18 @@ router.post("/:id/send-to-courier", async (req, res) => {
       });
     }
 
+    const savedCourier = await getCredential("courier", "steadfast");
+    const steadfastApiKey = savedCourier?.api_key || process.env.STEADFAST_API_KEY;
+    const steadfastSecretKey = savedCourier?.secret_key || process.env.STEADFAST_SECRET_KEY;
+
     const steadfastRes = await fetch(
       "https://portal.packzy.com/api/v1/create_order",
       {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Api-Key": process.env.STEADFAST_API_KEY,
-          "Secret-Key": process.env.STEADFAST_SECRET_KEY,
+          "Api-Key": steadfastApiKey,
+          "Secret-Key": steadfastSecretKey,
         },
         body: JSON.stringify({
           invoice: extracted.invoice || `ASBAB-${entry.id}`,
