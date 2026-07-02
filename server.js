@@ -3,6 +3,9 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const entriesRouter = require("./entries");
+const { router: authRouter } = require("./auth");
+const usersRouter = require("./users");
+const { router: settingsRouter } = require("./settings");
 
 const app = express();
 
@@ -14,6 +17,9 @@ app.get("/", (req, res) => {
   res.json({ status: "Asbab Abaya backend is running" });
 });
 
+app.use("/api/auth", authRouter);
+app.use("/api/users", usersRouter);
+app.use("/api/settings", settingsRouter);
 app.use("/api/entries", entriesRouter);
 
 const PORT = process.env.PORT || 3000;
