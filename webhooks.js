@@ -1,7 +1,7 @@
 // webhooks.js — receives "order created" events from the WooCommerce
-// website and drops them into "Website Order" for verification first.
-// From there, the Admin manually forwards to "All Order" (which triggers
-// the usual auto-forward to Pending/Making).
+// website and drops them straight into the "All Order" group, exactly as
+// if a moderator had typed them in. From there the existing auto-forward
+// to Pending/Making kicks in automatically.
 const express = require("express");
 const router = express.Router();
 const crypto = require("crypto");
