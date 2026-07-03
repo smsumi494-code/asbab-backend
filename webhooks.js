@@ -45,21 +45,12 @@ async function getProductImages(order) {
 // changes on the site don't break it).
 function extractCustomFields(order) {
   const keywords = ["লং", "size", "সাইজ"];
-  // Checkout Field Editor turns a Bengali field label into a meta key by
-  // slugifying it — Bengali characters can't be transliterated, so they
-  // get stripped down to just underscores. That's why "বোরকার লং" ends up
-  // as a key like "_billing____________" with no readable text at all.
-  // This regex catches that pattern directly since keyword matching can't.
-  const underscoreOnlyBillingKey = /^_billing_+$/;
-
   const lines = [];
   for (const meta of order.meta_data || []) {
     const label = meta.display_key || meta.key || "";
     const value = meta.display_value ?? meta.value;
     if (!value) continue;
-    const isKeywordMatch = keywords.some((k) => label.toLowerCase().includes(k.toLowerCase()));
-    const isUnderscoreBillingField = underscoreOnlyBillingKey.test(meta.key || "");
-    if (isKeywordMatch || isUnderscoreBillingField) {
+    if (keywords.some((k) => label.toLowerCase().includes(k.toLowerCase()))) {
       lines.push(`বোরকার লং: ${value}`);
     }
   }
@@ -122,7 +113,7 @@ router.post("/woocommerce", async (req, res) => {
   try {
     const rawText = buildRawTextFromOrder(req.body);
     const imageUrls = await getProductImages(req.body);
-    await createEntry({ rawText, imageUrls, moderator: "ওয়েবসাইট", group: "all_order" });
+    await createEntry({ rawText, imageUrls, moderator: "ওয়েবসাইট", group: "website_order" });
     res.status(200).json({ ok: true });
   } catch (err) {
     console.error("WooCommerce webhook failed:", err);
