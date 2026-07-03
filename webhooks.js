@@ -1,7 +1,7 @@
 // webhooks.js — receives "order created" events from the WooCommerce
-// website and drops them straight into the "All Order" group, exactly as
-// if a moderator had typed them in. From there the existing auto-forward
-// to Pending/Making kicks in automatically.
+// website and drops them into "Website Order" for verification first.
+// From there, the Admin manually forwards to "All Order" (which triggers
+// the usual auto-forward to Pending/Making).
 const express = require("express");
 const router = express.Router();
 const crypto = require("crypto");
@@ -45,12 +45,21 @@ async function getProductImages(order) {
 // changes on the site don't break it).
 function extractCustomFields(order) {
   const keywords = ["লং", "size", "সাইজ"];
+  // Checkout Field Editor turns a Bengali field label into a meta key by
+  // slugifying it — Bengali characters can't be transliterated, so they
+  // get stripped down to just underscores. That's why "বোরকার লং" ends up
+  // as a key like "_billing____________" with no readable text at all.
+  // This regex catches that pattern directly since keyword matching can't.
+  const underscoreOnlyBillingKey = /^_billing_+$/;
+
   const lines = [];
   for (const meta of order.meta_data || []) {
     const label = meta.display_key || meta.key || "";
     const value = meta.display_value ?? meta.value;
     if (!value) continue;
-    if (keywords.some((k) => label.toLowerCase().includes(k.toLowerCase()))) {
+    const isKeywordMatch = keywords.some((k) => label.toLowerCase().includes(k.toLowerCase()));
+    const isUnderscoreBillingField = underscoreOnlyBillingKey.test(meta.key || "");
+    if (isKeywordMatch || isUnderscoreBillingField) {
       lines.push(`বোরকার লং: ${value}`);
     }
   }
