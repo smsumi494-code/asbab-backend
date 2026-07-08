@@ -101,6 +101,8 @@ function buildRawTextFromOrder(order) {
 
 // POST /api/webhooks/woocommerce
 router.post("/woocommerce", async (req, res) => {
+  console.log("Woo webhook hit — body has id:", !!req.body?.id); // temporary debug, remove once confirmed working
+
   // Verify this really came from your WooCommerce site using the shared
   // secret set when the webhook was created (Settings → Advanced →
   // Webhooks in WordPress admin). Mismatches are logged rather than
