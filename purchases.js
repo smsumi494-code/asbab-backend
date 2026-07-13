@@ -40,10 +40,13 @@ router.post("/products", requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
-// PUT /api/purchases/products/:id — edit a product
+// PUT /api/purchases/products/:id — edit a product. If applyToAll is
+// true, also retroactively recalculates every existing entry that used
+// this product to the new price (otherwise old entries keep their
+// original snapshotted price, and only new entries use the new price).
 router.put("/products/:id", requireAuth, requireAdmin, async (req, res) => {
   const { id } = req.params;
-  const { name, pricePerUnit } = req.body;
+  const { name, pricePerUnit, applyToAll } = req.body;
   if (!name || !pricePerUnit) {
     return res.status(400).json({ error: "Product name and price are required" });
   }
@@ -53,7 +56,20 @@ router.put("/products/:id", requireAuth, requireAdmin, async (req, res) => {
       [name, pricePerUnit, id]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: "Product not found" });
-    res.json(result.rows[0]);
+
+    let updatedEntries = 0;
+    if (applyToAll) {
+      const updated = await pool.query(
+        `UPDATE purchase_entries
+         SET unit_price = $1, total_amount = quantity * $1
+         WHERE product_id = $2
+         RETURNING id`,
+        [pricePerUnit, id]
+      );
+      updatedEntries = updated.rows.length;
+    }
+
+    res.json({ ...result.rows[0], updatedEntries });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Could not update product" });
