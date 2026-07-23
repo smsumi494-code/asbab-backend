@@ -3,6 +3,7 @@
 // Facebook's ad algorithm learns which leads actually turn into real
 // deliveries over time (see conversation history for the full reasoning).
 const crypto = require("crypto");
+const pool = require("./db");
 const { getPageCredential } = require("./settings");
 
 function hashPhone(phone) {
@@ -11,16 +12,38 @@ function hashPhone(phone) {
   return crypto.createHash("sha256").update(e164).digest("hex");
 }
 
+// Website-order entries don't have a page_id set (the WooCommerce webhook
+// doesn't know which of our pages a site maps to) — fall back to Al-Haya
+// in that case, same pattern used for OTP SMS sending.
+async function resolvePageId(pageId) {
+  if (pageId) return pageId;
+  const alHaya = await pool.query("SELECT id FROM pages WHERE name = 'Al-Haya' LIMIT 1");
+  return alHaya.rows[0]?.id || null;
+}
+
 // eventName: "OrderComplete" | "OrderRefunded" (custom events — Facebook
 // fully supports these for Custom Conversions / algorithm learning, even
-// though they aren't part of the standard event list).
-async function sendFacebookEvent(pageId, phone, eventName) {
+// though they aren't part of the standard event list). name is optional
+// but improves match quality when available (already saved on shipped
+// orders from the Send to Courier AI extraction).
+async function sendFacebookEvent(pageId, phone, eventName, name = null) {
   try {
-    const cred = await getPageCredential("facebook", "meta", pageId);
+    const resolvedPageId = await resolvePageId(pageId);
+    const cred = await getPageCredential("facebook", "meta", resolvedPageId);
     const pixelId = cred?.api_key;
     const accessToken = cred?.secret_key;
     if (!pixelId || !accessToken) {
       return { success: false, error: "Facebook Pixel/Token সেটআপ করা হয়নি" };
+    }
+
+    const userData = { ph: [hashPhone(phone)] };
+    if (name) {
+      const parts = name.trim().split(/\s+/);
+      const firstName = parts[0];
+      const lastName = parts.slice(1).join(" ");
+      const hash = (s) => crypto.createHash("sha256").update(s.toLowerCase()).digest("hex");
+      if (firstName) userData.fn = [hash(firstName)];
+      if (lastName) userData.ln = [hash(lastName)];
     }
 
     const body = {
@@ -29,7 +52,7 @@ async function sendFacebookEvent(pageId, phone, eventName) {
           event_name: eventName,
           event_time: Math.floor(Date.now() / 1000),
           action_source: "system_generated",
-          user_data: { ph: [hashPhone(phone)] },
+          user_data: userData,
         },
       ],
     };
@@ -58,7 +81,8 @@ async function sendFacebookEvent(pageId, phone, eventName) {
 // "completed" or "refunded".
 async function updateWooOrderStatus(pageId, wooOrderId, status) {
   try {
-    const cred = await getPageCredential("woocommerce", "woocommerce", pageId);
+    const resolvedPageId = await resolvePageId(pageId);
+    const cred = await getPageCredential("woocommerce", "woocommerce", resolvedPageId);
     const key = cred?.api_key || process.env.WC_CONSUMER_KEY;
     const secret = cred?.secret_key || process.env.WC_CONSUMER_SECRET;
     const siteUrl = process.env.WC_SITE_URL || "https://asbababaya.com";
