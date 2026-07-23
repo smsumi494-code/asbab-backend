@@ -979,6 +979,22 @@ router.get("/otp-log", requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
+// GET /api/entries/facebook-log — Admin only. Recent Facebook
+// Complete/Refund event attempts (last 100).
+router.get("/facebook-log", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT phone, event_name, success, error, created_at
+       FROM facebook_event_log
+       ORDER BY created_at DESC LIMIT 100`
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Could not load Facebook event log" });
+  }
+});
+
 // GET /api/entries/recycle-bin — Admin only. Auto-deletes anything older
 // than 24 hours first, then returns what's left.
 router.get("/recycle-bin", requireAuth, requireAdmin, async (req, res) => {
