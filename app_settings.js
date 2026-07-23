@@ -10,6 +10,7 @@ const DEFAULTS = {
   late_post_prompt_enabled: "true",
   late_post_prompt_cutoff_hour: "12",
   late_post_prompt_cutoff_minute: "30",
+  courier_check_interval_minutes: "30",
 };
 
 async function getSetting(key) {
@@ -33,11 +34,13 @@ router.get("/", requireAuth, async (req, res) => {
     const cutoffHour = await getSetting("late_post_prompt_cutoff_hour");
     const cutoffMinute = await getSetting("late_post_prompt_cutoff_minute");
     const salesStartRes = await pool.query("SELECT value FROM app_settings WHERE key = 'sales_summary_start_at'");
+    const courierCheckIntervalMinutes = await getSetting("courier_check_interval_minutes");
     res.json({
       latePostPromptEnabled: enabled === "true",
       latePostPromptCutoffHour: Number(cutoffHour),
       latePostPromptCutoffMinute: Number(cutoffMinute),
       salesSummaryStartAt: salesStartRes.rows[0]?.value || null,
+      courierCheckIntervalMinutes: Number(courierCheckIntervalMinutes),
     });
   } catch (err) {
     console.error(err);
@@ -47,7 +50,10 @@ router.get("/", requireAuth, async (req, res) => {
 
 // PUT /api/app-settings — Admin only.
 router.put("/", requireAuth, requireAdmin, async (req, res) => {
-  const { latePostPromptEnabled, latePostPromptCutoffHour, latePostPromptCutoffMinute } = req.body;
+  const {
+    latePostPromptEnabled, latePostPromptCutoffHour, latePostPromptCutoffMinute,
+    courierCheckIntervalMinutes,
+  } = req.body;
   try {
     if (latePostPromptEnabled !== undefined) {
       await setSetting("late_post_prompt_enabled", latePostPromptEnabled ? "true" : "false");
@@ -58,6 +64,9 @@ router.put("/", requireAuth, requireAdmin, async (req, res) => {
     if (latePostPromptCutoffMinute !== undefined) {
       await setSetting("late_post_prompt_cutoff_minute", latePostPromptCutoffMinute);
     }
+    if (courierCheckIntervalMinutes !== undefined) {
+      await setSetting("courier_check_interval_minutes", courierCheckIntervalMinutes);
+    }
     res.json({ saved: true });
   } catch (err) {
     console.error(err);
@@ -65,4 +74,4 @@ router.put("/", requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
-module.exports = { router };
+module.exports = { router, getSetting };
