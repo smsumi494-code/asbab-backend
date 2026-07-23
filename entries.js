@@ -1109,15 +1109,20 @@ router.delete("/:id", requireAuth, requireAdmin, async (req, res) => {
       // Rejected without ever confirming/forwarding it — treat exactly
       // like a cancel/return for Facebook + WooCommerce, in the
       // background so the delete itself stays fast.
+      console.log("Refund-sync check — woo_order_id:", entry.woo_order_id, "page_id:", entry.page_id); // temporary debug
       if (entry.woo_order_id) {
         (async () => {
           try {
-            await sendFacebookEvent(entry.page_id, entry.customer_phone, "OrderRefunded");
-            await updateWooOrderStatus(entry.page_id, entry.woo_order_id, "refunded");
+            const fbResult = await sendFacebookEvent(entry.page_id, entry.customer_phone, "OrderRefunded", entry.customer_name);
+            console.log("Refund-sync — Facebook result:", JSON.stringify(fbResult)); // temporary debug
+            const wcResult = await updateWooOrderStatus(entry.page_id, entry.woo_order_id, "refunded");
+            console.log("Refund-sync — WooCommerce result:", JSON.stringify(wcResult)); // temporary debug
           } catch (err) {
             console.error("Facebook/WC refund sync failed (website order delete):", err.message);
           }
         })();
+      } else {
+        console.log("Refund-sync skipped — no woo_order_id on this entry"); // temporary debug
       }
     }
 
@@ -1559,7 +1564,7 @@ router.post("/:id/send-to-courier", requireAuth, requireAdmin, async (req, res) 
 // pending/in-review is left alone and checked again next time.
 async function checkCourierStatusesAndSyncFacebook() {
   const result = await pool.query(
-    `SELECT id, consignment_id, page_id, customer_phone, woo_order_id
+    `SELECT id, consignment_id, page_id, customer_phone, customer_name, woo_order_id
      FROM entries
      WHERE group_name = 'all_order' AND consignment_id IS NOT NULL
        AND woo_order_id IS NOT NULL AND fb_event_sent IS NULL`
@@ -1592,7 +1597,7 @@ async function checkCourierStatusesAndSyncFacebook() {
       // leave it for the next periodic check.
       if (!eventName) continue;
 
-      const fbResult = await sendFacebookEvent(entry.page_id, entry.customer_phone, eventName);
+      const fbResult = await sendFacebookEvent(entry.page_id, entry.customer_phone, eventName, entry.customer_name);
       const wcResult = await updateWooOrderStatus(entry.page_id, entry.woo_order_id, wcStatus);
       if (!fbResult.success) console.warn("Facebook event failed for entry", entry.id, fbResult.error);
       if (!wcResult.success) console.warn("WC status update failed for entry", entry.id, wcResult.error);
