@@ -8,6 +8,7 @@ const { getCredential, getPreferredAiCredential, getPageCredential, getPagePrefe
 const { notifyAll } = require("./push");
 const { addClient, removeClient, broadcastRefresh } = require("./sse");
 const { getConsignmentTracking } = require("./steadfast_tracking");
+const { sendFacebookEvent, updateWooOrderStatus } = require("./facebook");
 
 // Sends an order-confirmation SMS via Alpha SMS (api.sms.net.bd) — one
 // shared account/API key for the whole business (set as an env var),
@@ -488,18 +489,19 @@ router.get("/stream", (req, res) => {
 // Shared creation logic — inserts the entry, and if it's posted to "All
 // Order", auto-forwards copies into "Pending" and "Making" too. Used by
 // both the app's POST route and the WooCommerce webhook.
-async function createEntry({ rawText, imageUrls, moderator, group, pageId, pageName, status, customerPhone, customerDevice, salesDateChoice }) {
+async function createEntry({ rawText, imageUrls, moderator, group, pageId, pageName, status, customerPhone, customerDevice, salesDateChoice, wooOrderId }) {
   const targetGroup = group || "pending";
   const batchId = randomUUID();
   const images = JSON.stringify(imageUrls || []);
   const isYesterday = salesDateChoice === "yesterday";
 
   const result = await pool.query(
-    `INSERT INTO entries (raw_text, image_urls, moderator, group_name, batch_id, page_id, page_name, status, customer_phone, customer_device, sales_date)
+    `INSERT INTO entries (raw_text, image_urls, moderator, group_name, batch_id, page_id, page_name, status, customer_phone, customer_device, sales_date, woo_order_id)
      VALUES ($1, $2::jsonb, $3, $4, $5, $6, $7, COALESCE($8, 'pending'), $9, $10,
-       CASE WHEN $11 THEN ((NOW() AT TIME ZONE 'Asia/Dhaka')::date - INTERVAL '1 day') ELSE ((NOW() AT TIME ZONE 'Asia/Dhaka')::date) END)
+       CASE WHEN $11 THEN ((NOW() AT TIME ZONE 'Asia/Dhaka')::date - INTERVAL '1 day') ELSE ((NOW() AT TIME ZONE 'Asia/Dhaka')::date) END,
+       $12)
      RETURNING *`,
-    [rawText, images, moderator, targetGroup, batchId, pageId || null, pageName || null, status || null, customerPhone || null, customerDevice || null, isYesterday]
+    [rawText, images, moderator, targetGroup, batchId, pageId || null, pageName || null, status || null, customerPhone || null, customerDevice || null, isYesterday, wooOrderId || null]
   );
 
   if (targetGroup === "all_order") {
@@ -1103,6 +1105,20 @@ router.delete("/:id", requireAuth, requireAdmin, async (req, res) => {
          VALUES ('website_order', $1, $2::jsonb, $3, $4, $5, $6, $7, $8)`,
         [entry.raw_text, JSON.stringify(entry.image_urls || []), entry.moderator, entry.page_id, entry.page_name, reason, entry.status, entry.customer_phone]
       );
+
+      // Rejected without ever confirming/forwarding it — treat exactly
+      // like a cancel/return for Facebook + WooCommerce, in the
+      // background so the delete itself stays fast.
+      if (entry.woo_order_id) {
+        (async () => {
+          try {
+            await sendFacebookEvent(entry.page_id, entry.customer_phone, "OrderRefunded");
+            await updateWooOrderStatus(entry.page_id, entry.woo_order_id, "refunded");
+          } catch (err) {
+            console.error("Facebook/WC refund sync failed (website order delete):", err.message);
+          }
+        })();
+      }
     }
 
     await pool.query("DELETE FROM entries WHERE id = $1", [id]);
@@ -1180,6 +1196,7 @@ router.post("/:id/send-to-all-order", requireAuth, requireAdmin, async (req, res
       pageId,
       pageName,
       salesDateChoice: dayChoice,
+      wooOrderId: entry.woo_order_id,
     });
 
     // Order-confirmation SMS, if this page has it turned on. Uses AI
@@ -1534,4 +1551,60 @@ router.post("/:id/send-to-courier", requireAuth, requireAdmin, async (req, res) 
   }
 });
 
-module.exports = { router, createEntry, sendSMS, getPageSmsSettings, fillSmsTemplate };
+// Periodically called (see server.js) — checks Steadfast's official
+// delivery status for every shipped order that came from the website
+// (has a woo_order_id) and hasn't been synced to Facebook yet. Delivered
+// or partial_delivered → "Complete" (Facebook event + WC status
+// "completed"). Cancelled/returned → "Refunded". Anything still
+// pending/in-review is left alone and checked again next time.
+async function checkCourierStatusesAndSyncFacebook() {
+  const result = await pool.query(
+    `SELECT id, consignment_id, page_id, customer_phone, woo_order_id
+     FROM entries
+     WHERE group_name = 'all_order' AND consignment_id IS NOT NULL
+       AND woo_order_id IS NOT NULL AND fb_event_sent IS NULL`
+  );
+
+  for (const entry of result.rows) {
+    try {
+      const courierCred = await getPageCredential("courier", "steadfast", entry.page_id);
+      const sfKey = courierCred?.api_key;
+      const sfSecret = courierCred?.secret_key;
+      if (!sfKey || !sfSecret) continue;
+
+      const sfRes = await fetch(`https://portal.packzy.com/api/v1/status_by_cid/${entry.consignment_id}`, {
+        headers: { "content-type": "application/json", "api-key": sfKey, "secret-key": sfSecret },
+      });
+      const sfData = await sfRes.json();
+      const status = sfData?.delivery_status;
+      if (!status) continue;
+
+      let eventName = null;
+      let wcStatus = null;
+      if (status === "delivered" || status === "partial_delivered") {
+        eventName = "OrderComplete";
+        wcStatus = "completed";
+      } else if (status === "cancelled") {
+        eventName = "OrderRefunded";
+        wcStatus = "refunded";
+      }
+      // Anything else (pending, hold, in_review, etc.) — not final yet,
+      // leave it for the next periodic check.
+      if (!eventName) continue;
+
+      const fbResult = await sendFacebookEvent(entry.page_id, entry.customer_phone, eventName);
+      const wcResult = await updateWooOrderStatus(entry.page_id, entry.woo_order_id, wcStatus);
+      if (!fbResult.success) console.warn("Facebook event failed for entry", entry.id, fbResult.error);
+      if (!wcResult.success) console.warn("WC status update failed for entry", entry.id, wcResult.error);
+
+      await pool.query("UPDATE entries SET fb_event_sent = $1 WHERE id = $2", [
+        eventName === "OrderComplete" ? "complete" : "refund",
+        entry.id,
+      ]);
+    } catch (err) {
+      console.error("Courier status check failed for entry", entry.id, err.message);
+    }
+  }
+}
+
+module.exports = { router, createEntry, sendSMS, getPageSmsSettings, fillSmsTemplate, checkCourierStatusesAndSyncFacebook };
