@@ -2,7 +2,7 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-const { router: entriesRouter } = require("./entries");
+const { router: entriesRouter, checkCourierStatusesAndSyncFacebook } = require("./entries");
 const { router: authRouter } = require("./auth");
 const usersRouter = require("./users");
 const { router: settingsRouter } = require("./settings");
@@ -65,3 +65,25 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
+
+// Checks delivery status for shipped website orders and syncs
+// Complete/Refund to Facebook + WooCommerce. Re-reads the configured
+// interval before each run and reschedules itself, so changing the
+// interval in Settings takes effect on the very next run — no restart
+// needed. Defaults to 30 minutes if never configured.
+async function scheduleCourierCheck() {
+  try {
+    await checkCourierStatusesAndSyncFacebook();
+  } catch (err) {
+    console.error("Courier/Facebook sync failed:", err.message);
+  }
+  let minutes = 30;
+  try {
+    const { getSetting } = require("./app_settings");
+    minutes = Number(await getSetting("courier_check_interval_minutes")) || 30;
+  } catch (err) {
+    console.error("Could not read courier check interval, using default:", err.message);
+  }
+  setTimeout(scheduleCourierCheck, minutes * 60 * 1000);
+}
+setTimeout(scheduleCourierCheck, 10 * 1000);
