@@ -489,19 +489,19 @@ router.get("/stream", (req, res) => {
 // Shared creation logic — inserts the entry, and if it's posted to "All
 // Order", auto-forwards copies into "Pending" and "Making" too. Used by
 // both the app's POST route and the WooCommerce webhook.
-async function createEntry({ rawText, imageUrls, moderator, group, pageId, pageName, status, customerPhone, customerDevice, salesDateChoice, wooOrderId }) {
+async function createEntry({ rawText, imageUrls, moderator, group, pageId, pageName, status, customerPhone, customerDevice, salesDateChoice, wooOrderId, fbp, fbc }) {
   const targetGroup = group || "pending";
   const batchId = randomUUID();
   const images = JSON.stringify(imageUrls || []);
   const isYesterday = salesDateChoice === "yesterday";
 
   const result = await pool.query(
-    `INSERT INTO entries (raw_text, image_urls, moderator, group_name, batch_id, page_id, page_name, status, customer_phone, customer_device, sales_date, woo_order_id)
+    `INSERT INTO entries (raw_text, image_urls, moderator, group_name, batch_id, page_id, page_name, status, customer_phone, customer_device, sales_date, woo_order_id, fbp, fbc)
      VALUES ($1, $2::jsonb, $3, $4, $5, $6, $7, COALESCE($8, 'pending'), $9, $10,
        CASE WHEN $11 THEN ((NOW() AT TIME ZONE 'Asia/Dhaka')::date - INTERVAL '1 day') ELSE ((NOW() AT TIME ZONE 'Asia/Dhaka')::date) END,
-       $12)
+       $12, $13, $14)
      RETURNING *`,
-    [rawText, images, moderator, targetGroup, batchId, pageId || null, pageName || null, status || null, customerPhone || null, customerDevice || null, isYesterday, wooOrderId || null]
+    [rawText, images, moderator, targetGroup, batchId, pageId || null, pageName || null, status || null, customerPhone || null, customerDevice || null, isYesterday, wooOrderId || null, fbp || null, fbc || null]
   );
 
   if (targetGroup === "all_order") {
@@ -1129,7 +1129,7 @@ router.delete("/:id", requireAuth, requireAdmin, async (req, res) => {
       if (entry.woo_order_id) {
         (async () => {
           try {
-            const fbResult = await sendFacebookEvent(entry.page_id, entry.customer_phone, "OrderRefunded", entry.customer_name);
+            const fbResult = await sendFacebookEvent(entry.page_id, entry.customer_phone, "OrderRefunded", entry.customer_name, entry.fbp, entry.fbc);
             console.log("Refund-sync — Facebook result:", JSON.stringify(fbResult)); // temporary debug
             const wcResult = await updateWooOrderStatus(entry.page_id, entry.woo_order_id, "refunded");
             console.log("Refund-sync — WooCommerce result:", JSON.stringify(wcResult)); // temporary debug
@@ -1218,6 +1218,8 @@ router.post("/:id/send-to-all-order", requireAuth, requireAdmin, async (req, res
       pageName,
       salesDateChoice: dayChoice,
       wooOrderId: entry.woo_order_id,
+      fbp: entry.fbp,
+      fbc: entry.fbc,
     });
 
     // Order-confirmation SMS, if this page has it turned on. Uses AI
@@ -1580,7 +1582,7 @@ router.post("/:id/send-to-courier", requireAuth, requireAdmin, async (req, res) 
 // pending/in-review is left alone and checked again next time.
 async function checkCourierStatusesAndSyncFacebook() {
   const result = await pool.query(
-    `SELECT id, consignment_id, page_id, customer_phone, customer_name, woo_order_id
+    `SELECT id, consignment_id, page_id, customer_phone, customer_name, woo_order_id, fbp, fbc
      FROM entries
      WHERE group_name = 'all_order' AND consignment_id IS NOT NULL
        AND woo_order_id IS NOT NULL AND fb_event_sent IS NULL`
@@ -1613,7 +1615,7 @@ async function checkCourierStatusesAndSyncFacebook() {
       // leave it for the next periodic check.
       if (!eventName) continue;
 
-      const fbResult = await sendFacebookEvent(entry.page_id, entry.customer_phone, eventName, entry.customer_name);
+      const fbResult = await sendFacebookEvent(entry.page_id, entry.customer_phone, eventName, entry.customer_name, entry.fbp, entry.fbc);
       const wcResult = await updateWooOrderStatus(entry.page_id, entry.woo_order_id, wcStatus);
       if (!fbResult.success) console.warn("Facebook event failed for entry", entry.id, fbResult.error);
       if (!wcResult.success) console.warn("WC status update failed for entry", entry.id, wcResult.error);
