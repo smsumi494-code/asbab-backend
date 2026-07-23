@@ -136,6 +136,7 @@ router.post("/woocommerce", async (req, res) => {
       group: "website_order",
       status: "processing",
       customerPhone: completedPhone || null,
+      wooOrderId: req.body.id,
     });
 
     // They finished checkout after all — remove any lingering "Incomplete"
