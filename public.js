@@ -8,7 +8,6 @@ const { getPageCredential } = require("./settings");
 const { sendSMS } = require("./entries");
 
 function checkSecret(req, res) {
-  console.log("Public API hit:", req.method, req.originalUrl, "body:", JSON.stringify(req.body || {})); // temporary debug
   const provided = req.body?.secret || req.query?.secret;
   const expected = process.env.WOOCOMMERCE_WEBHOOK_SECRET;
   if (!expected || provided !== expected) {
@@ -76,31 +75,42 @@ router.post("/send-otp", async (req, res) => {
   const code = String(Math.floor(100000 + Math.random() * 900000));
   const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
   try {
-    await pool.query("INSERT INTO otp_verifications (phone, code, expires_at) VALUES ($1, $2, $3)", [
-      phone,
-      code,
-      expiresAt,
-    ]);
+    const inserted = await pool.query(
+      "INSERT INTO otp_verifications (phone, code, expires_at) VALUES ($1, $2, $3) RETURNING id",
+      [phone, code, expiresAt]
+    );
+    const rowId = inserted.rows[0].id;
 
     // Uses the Al-Haya page's SMS token by default (same fallback pattern
     // used elsewhere for website-related things where the page isn't
     // known yet) — pass pageId if the checkout knows which brand it is.
     let smsToken = null;
+    let pageName = null;
     const pageId = req.body.pageId || null;
     if (pageId) {
       const cred = await getPageCredential("sms", "bdbulksms", pageId);
       smsToken = cred?.api_key || null;
+      const pageRes = await pool.query("SELECT name FROM pages WHERE id = $1", [pageId]);
+      pageName = pageRes.rows[0]?.name || null;
     }
     if (!smsToken) {
-      const alHaya = await pool.query("SELECT id FROM pages WHERE name = 'Al-Haya' LIMIT 1");
+      const alHaya = await pool.query("SELECT id, name FROM pages WHERE name = 'Al-Haya' LIMIT 1");
       if (alHaya.rows.length) {
         const cred = await getPageCredential("sms", "bdbulksms", alHaya.rows[0].id);
         smsToken = cred?.api_key || null;
+        pageName = alHaya.rows[0].name;
       }
     }
 
-    const message = `আপনার Asbab Abaya OTP কোড: ${code}। এটি ৫ মিনিটের জন্য বৈধ। কারো সাথে শেয়ার করবেন না।`;
-    const smsResult = await sendSMS(phone, message, smsToken);
+    const message = `আপনার ${pageName || "Asbab Abaya"} OTP কোড: ${code}। এটি ৫ মিনিটের জন্য বৈধ। কারো সাথে শেয়ার করবেন না।`;
+    const smsResult = await sendSMS(phone, message, smsToken, "otp");
+
+    await pool.query("UPDATE otp_verifications SET sent = $1, send_error = $2 WHERE id = $3", [
+      smsResult.success,
+      smsResult.error || null,
+      rowId,
+    ]);
+
     res.json({ sent: smsResult.success, error: smsResult.error || null });
   } catch (err) {
     console.error("send-otp failed:", err.message);
