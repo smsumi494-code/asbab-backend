@@ -43,6 +43,14 @@ app.use(
 );
 
 // Simple health check — visiting your Railway URL directly will show this.
+// Temporary debug — logs every single incoming request, so we can see
+// whether requests are even reaching this server at all (helps diagnose
+// "no logs appear" issues from external callers like WordPress).
+app.use((req, res, next) => {
+  console.log("Incoming request:", req.method, req.originalUrl);
+  next();
+});
+
 app.get("/", (req, res) => {
   res.json({ status: "Asbab Abaya backend is running" });
 });
