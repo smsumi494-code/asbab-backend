@@ -13,6 +13,7 @@ const { router: purchasesRouter } = require("./purchases");
 const { router: analyticsRouter } = require("./analytics");
 const { router: appSettingsRouter } = require("./app_settings");
 const { router: publicRouter } = require("./public");
+const { router: systemAlertsRouter } = require("./system_alerts");
 
 const app = express();
 
@@ -43,14 +44,6 @@ app.use(
 );
 
 // Simple health check — visiting your Railway URL directly will show this.
-// Temporary debug — logs every single incoming request, so we can see
-// whether requests are even reaching this server at all (helps diagnose
-// "no logs appear" issues from external callers like WordPress).
-app.use((req, res, next) => {
-  console.log("Incoming request:", req.method, req.originalUrl);
-  next();
-});
-
 app.get("/", (req, res) => {
   res.json({ status: "Asbab Abaya backend is running" });
 });
@@ -66,6 +59,7 @@ app.use("/api/purchases", purchasesRouter);
 app.use("/api/analytics", analyticsRouter);
 app.use("/api/app-settings", appSettingsRouter);
 app.use("/api/public", publicRouter);
+app.use("/api/system-alerts", systemAlertsRouter);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
