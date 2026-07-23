@@ -50,6 +50,10 @@ router.get("/:id", requireAuth, requireAdmin, async (req, res) => {
       "SELECT api_key, secret_key FROM api_credentials WHERE page_id = $1 AND type = 'steadfast_moderator' LIMIT 1",
       [id]
     );
+    const fbRes = await pool.query(
+      "SELECT api_key, secret_key FROM api_credentials WHERE page_id = $1 AND type = 'facebook' LIMIT 1",
+      [id]
+    );
 
     res.json({
       ...pageRes.rows[0],
@@ -62,6 +66,8 @@ router.get("/:id", requireAuth, requireAdmin, async (req, res) => {
       deliveryNote: pageRes.rows[0].delivery_note || "",
       moderatorEmail: modRes.rows[0]?.api_key || "",
       moderatorPassword: modRes.rows[0]?.secret_key || "",
+      fbPixelId: fbRes.rows[0]?.api_key || "",
+      fbAccessToken: fbRes.rows[0]?.secret_key || "",
       smsOnWebsiteOrder: pageRes.rows[0].sms_on_website_order,
       smsOnAllOrder: pageRes.rows[0].sms_on_all_order,
       smsMessage: pageRes.rows[0].sms_message || "",
@@ -78,6 +84,7 @@ router.post("/", requireAuth, requireAdmin, async (req, res) => {
   const {
     name, tagline, siteUrl, courierApiKey, courierSecretKey, aiCredentials, wcConsumerKey, wcConsumerSecret,
     smsOnWebsiteOrder, smsOnAllOrder, smsMessage, smsToken, deliveryNote, moderatorEmail, moderatorPassword,
+    fbPixelId, fbAccessToken,
   } = req.body;
   const cleanAiCreds = (aiCredentials || []).filter((c) => c?.provider && c?.apiKey).slice(0, MAX_AI_KEYS);
 
@@ -108,6 +115,14 @@ router.post("/", requireAuth, requireAdmin, async (req, res) => {
         `INSERT INTO api_credentials (type, provider, api_key, secret_key, page_id)
          VALUES ('steadfast_moderator', 'steadfast', $1, $2, $3)`,
         [moderatorEmail, moderatorPassword, page.id]
+      );
+    }
+
+    if (fbPixelId && fbAccessToken) {
+      await client.query(
+        `INSERT INTO api_credentials (type, provider, api_key, secret_key, page_id)
+         VALUES ('facebook', 'meta', $1, $2, $3)`,
+        [fbPixelId, fbAccessToken, page.id]
       );
     }
 
@@ -151,6 +166,7 @@ router.put("/:id", requireAuth, requireAdmin, async (req, res) => {
   const {
     name, tagline, siteUrl, courierApiKey, courierSecretKey, aiCredentials, wcConsumerKey, wcConsumerSecret,
     smsOnWebsiteOrder, smsOnAllOrder, smsMessage, smsToken, deliveryNote, moderatorEmail, moderatorPassword,
+    fbPixelId, fbAccessToken,
   } = req.body;
   const cleanAiCreds = (aiCredentials || []).filter((c) => c?.provider && c?.apiKey).slice(0, MAX_AI_KEYS);
 
@@ -199,6 +215,25 @@ router.put("/:id", requireAuth, requireAdmin, async (req, res) => {
           `INSERT INTO api_credentials (type, provider, api_key, secret_key, page_id)
            VALUES ('steadfast_moderator', 'steadfast', $1, $2, $3)`,
           [moderatorEmail, moderatorPassword, id]
+        );
+      }
+    }
+
+    if (fbPixelId && fbAccessToken) {
+      const existingFb = await client.query(
+        "SELECT id FROM api_credentials WHERE page_id = $1 AND type = 'facebook'",
+        [id]
+      );
+      if (existingFb.rows.length) {
+        await client.query(
+          "UPDATE api_credentials SET api_key = $1, secret_key = $2 WHERE id = $3",
+          [fbPixelId, fbAccessToken, existingFb.rows[0].id]
+        );
+      } else {
+        await client.query(
+          `INSERT INTO api_credentials (type, provider, api_key, secret_key, page_id)
+           VALUES ('facebook', 'meta', $1, $2, $3)`,
+          [fbPixelId, fbAccessToken, id]
         );
       }
     }
