@@ -8,6 +8,7 @@ const { getPageCredential } = require("./settings");
 const { sendSMS } = require("./entries");
 
 function checkSecret(req, res) {
+  console.log("Public API hit:", req.method, req.originalUrl, "body:", JSON.stringify(req.body || {})); // temporary debug
   const provided = req.body?.secret || req.query?.secret;
   const expected = process.env.WOOCOMMERCE_WEBHOOK_SECRET;
   if (!expected || provided !== expected) {
