@@ -90,12 +90,13 @@ router.post("/send-otp", async (req, res) => {
   }
   const code = String(Math.floor(100000 + Math.random() * 900000));
   const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
+  let rowId = null;
   try {
     const inserted = await pool.query(
       "INSERT INTO otp_verifications (phone, code, expires_at) VALUES ($1, $2, $3) RETURNING id",
       [phone, code, expiresAt]
     );
-    const rowId = inserted.rows[0].id;
+    rowId = inserted.rows[0].id;
 
     let smsResult;
     try {
@@ -121,7 +122,18 @@ router.post("/send-otp", async (req, res) => {
       }
 
       const message = `আপনার ${pageName || "Asbab Abaya"} OTP কোড: ${code}। এটি ৫ মিনিটের জন্য বৈধ। কারো সাথে শেয়ার করবেন না।`;
-      smsResult = await sendSMS(phone, message, smsToken, "otp");
+
+      // Retry a few times fast before giving up — most failures here are
+      // transient (a momentary network/API blip), and the customer should
+      // never see one unless it genuinely keeps failing.
+      const maxAttempts = 3;
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        smsResult = await sendSMS(phone, message, smsToken, "otp");
+        if (smsResult.success) break;
+        if (attempt < maxAttempts) {
+          await new Promise((resolve) => setTimeout(resolve, 800));
+        }
+      }
     } catch (innerErr) {
       // Anything above (credential lookup, page-name lookup) failing
       // shouldn't leave the OTP log blank — record what actually broke.
@@ -138,6 +150,19 @@ router.post("/send-otp", async (req, res) => {
     res.json({ sent: smsResult.success, error: smsResult.error || null });
   } catch (err) {
     console.error("send-otp failed:", err.message);
+    // Last-resort safety net — if rowId exists but we never got to record
+    // an outcome (e.g. the UPDATE query itself failed), mark it here so
+    // the OTP log never shows a blank/unexplained failure.
+    if (rowId) {
+      try {
+        await pool.query("UPDATE otp_verifications SET sent = false, send_error = $1 WHERE id = $2", [
+          `অপ্রত্যাশিত এরর: ${err.message}`,
+          rowId,
+        ]);
+      } catch (loggingErr) {
+        console.error("Could not even log the failure:", loggingErr.message);
+      }
+    }
     res.status(500).json({ error: "OTP পাঠানো যায়নি" });
   }
 });
