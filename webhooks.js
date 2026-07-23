@@ -128,6 +128,8 @@ router.post("/woocommerce", async (req, res) => {
     const imageUrls = await getProductImages(req.body);
     const completedPhone = (req.body.billing?.phone || "").replace(/\D/g, "");
     const completedDevice = (req.body.meta_data || []).find((m) => m.key === "_cooldown_device")?.value || null;
+    const fbp = (req.body.meta_data || []).find((m) => m.key === "_fbp")?.value || null;
+    const fbc = (req.body.meta_data || []).find((m) => m.key === "_fbc")?.value || null;
 
     await createEntry({
       rawText,
@@ -137,6 +139,8 @@ router.post("/woocommerce", async (req, res) => {
       status: "processing",
       customerPhone: completedPhone || null,
       wooOrderId: req.body.id,
+      fbp,
+      fbc,
     });
 
     // They finished checkout after all — remove any lingering "Incomplete"
