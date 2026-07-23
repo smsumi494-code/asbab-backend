@@ -97,29 +97,37 @@ router.post("/send-otp", async (req, res) => {
     );
     const rowId = inserted.rows[0].id;
 
-    // Uses the Al-Haya page's SMS token by default (same fallback pattern
-    // used elsewhere for website-related things where the page isn't
-    // known yet) — pass pageId if the checkout knows which brand it is.
-    let smsToken = null;
-    let pageName = null;
-    const pageId = req.body.pageId || null;
-    if (pageId) {
-      const cred = await getPageCredential("sms", "bdbulksms", pageId);
-      smsToken = cred?.api_key || null;
-      const pageRes = await pool.query("SELECT name FROM pages WHERE id = $1", [pageId]);
-      pageName = pageRes.rows[0]?.name || null;
-    }
-    if (!smsToken) {
-      const alHaya = await pool.query("SELECT id, name FROM pages WHERE name = 'Al-Haya' LIMIT 1");
-      if (alHaya.rows.length) {
-        const cred = await getPageCredential("sms", "bdbulksms", alHaya.rows[0].id);
+    let smsResult;
+    try {
+      // Uses the Al-Haya page's SMS token by default (same fallback
+      // pattern used elsewhere for website-related things where the page
+      // isn't known yet) — pass pageId if the checkout knows the brand.
+      let smsToken = null;
+      let pageName = null;
+      const pageId = req.body.pageId || null;
+      if (pageId) {
+        const cred = await getPageCredential("sms", "bdbulksms", pageId);
         smsToken = cred?.api_key || null;
-        pageName = alHaya.rows[0].name;
+        const pageRes = await pool.query("SELECT name FROM pages WHERE id = $1", [pageId]);
+        pageName = pageRes.rows[0]?.name || null;
       }
-    }
+      if (!smsToken) {
+        const alHaya = await pool.query("SELECT id, name FROM pages WHERE name = 'Al-Haya' LIMIT 1");
+        if (alHaya.rows.length) {
+          const cred = await getPageCredential("sms", "bdbulksms", alHaya.rows[0].id);
+          smsToken = cred?.api_key || null;
+          pageName = alHaya.rows[0].name;
+        }
+      }
 
-    const message = `আপনার ${pageName || "Asbab Abaya"} OTP কোড: ${code}। এটি ৫ মিনিটের জন্য বৈধ। কারো সাথে শেয়ার করবেন না।`;
-    const smsResult = await sendSMS(phone, message, smsToken, "otp");
+      const message = `আপনার ${pageName || "Asbab Abaya"} OTP কোড: ${code}। এটি ৫ মিনিটের জন্য বৈধ। কারো সাথে শেয়ার করবেন না।`;
+      smsResult = await sendSMS(phone, message, smsToken, "otp");
+    } catch (innerErr) {
+      // Anything above (credential lookup, page-name lookup) failing
+      // shouldn't leave the OTP log blank — record what actually broke.
+      console.error("send-otp credential/setup failed:", innerErr.message);
+      smsResult = { success: false, error: `সেটআপ ব্যর্থ: ${innerErr.message}` };
+    }
 
     await pool.query("UPDATE otp_verifications SET sent = $1, send_error = $2 WHERE id = $3", [
       smsResult.success,
