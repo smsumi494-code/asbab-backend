@@ -24,9 +24,23 @@ function fillSmsTemplate(template, { name, orderNumber, amount, size }) {
     .replace(/\{size\}/gi, size || "");
 }
 
-async function sendSMS(phone, message, token) {
+async function sendSMS(phone, message, token, purpose = "order_confirmation") {
   const finalToken = (token || process.env.SMS_API_KEY || "").trim();
-  if (!finalToken || !phone || !message) return { success: false, error: "SMS সেটআপ করা হয়নি" };
+  const logResult = async (success, error) => {
+    try {
+      await pool.query(
+        "INSERT INTO sms_delivery_log (phone, purpose, success, error) VALUES ($1, $2, $3, $4)",
+        [phone || null, purpose, success, error || null]
+      );
+    } catch (err) {
+      console.warn("Could not write sms_delivery_log:", err.message);
+    }
+  };
+
+  if (!finalToken || !phone || !message) {
+    await logResult(false, "SMS সেটআপ করা হয়নি");
+    return { success: false, error: "SMS সেটআপ করা হয়নি" };
+  }
   try {
     const digits = phone.replace(/\D/g, "");
     const to = digits.startsWith("880") ? digits : `880${digits.replace(/^0/, "")}`;
@@ -44,20 +58,25 @@ async function sendSMS(phone, message, token) {
       results = JSON.parse(rawText);
     } catch {
       console.warn("SMS response wasn't valid JSON:", rawText);
+      await logResult(false, "অপ্রত্যাশিত রেসপন্স");
       return { success: false, error: "অপ্রত্যাশিত রেসপন্স" };
     }
 
     const result = Array.isArray(results) ? results[0] : results;
     if (!result) {
+      await logResult(false, "কোনো ফলাফল পাওয়া যায়নি");
       return { success: false, error: "কোনো ফলাফল পাওয়া যায়নি" };
     }
     if (result.status === "SENT") {
+      await logResult(true, null);
       return { success: true, error: null };
     }
     console.warn("SMS send failed:", result.statusmsg || rawText);
+    await logResult(false, result.statusmsg || "SMS পাঠানো যায়নি");
     return { success: false, error: result.statusmsg || "SMS পাঠানো যায়নি" };
   } catch (err) {
     console.warn("SMS send failed:", err.message);
+    await logResult(false, err.message);
     return { success: false, error: err.message };
   }
 }
@@ -238,7 +257,16 @@ async function callAI(userText, systemPrompt, { json = false, pageId = null, pat
       lastError = err;
     }
   }
-  throw lastError || new Error("All AI keys failed");
+  const finalError = lastError || new Error("All AI keys failed");
+  try {
+    await pool.query("INSERT INTO ai_failure_log (context, error) VALUES ($1, $2)", [
+      systemPrompt.slice(0, 60),
+      finalError.message,
+    ]);
+  } catch (err) {
+    console.warn("Could not write ai_failure_log:", err.message);
+  }
+  throw finalError;
 }
 
 // Reads the moderator's free-form pasted message and pulls out exactly the
@@ -929,6 +957,23 @@ router.post("/backfill-locations", requireAuth, requireAdmin, async (req, res) =
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Could not backfill locations" });
+  }
+});
+
+// GET /api/entries/otp-log — Admin only. Recent OTP send attempts (last
+// 100), so delivery problems can be spotted from inside the app instead
+// of digging through Railway logs. Never exposes the actual OTP code.
+router.get("/otp-log", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT phone, sent, send_error, verified, created_at
+       FROM otp_verifications
+       ORDER BY created_at DESC LIMIT 100`
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Could not load OTP log" });
   }
 });
 
