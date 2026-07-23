@@ -25,9 +25,11 @@ async function resolvePageId(pageId) {
 // fully supports these for Custom Conversions / algorithm learning, even
 // though they aren't part of the standard event list). name is optional
 // but improves match quality when available (already saved on shipped
-// orders from the Send to Courier AI extraction).
-async function sendFacebookEvent(pageId, phone, eventName, name = null) {
-  const result = await sendFacebookEventInner(pageId, phone, eventName, name);
+// orders from the Send to Courier AI extraction). fbp/fbc (Facebook's own
+// browser/click IDs, captured at checkout) are the strongest signal when
+// available — passed through AS-IS, never hashed.
+async function sendFacebookEvent(pageId, phone, eventName, name = null, fbp = null, fbc = null) {
+  const result = await sendFacebookEventInner(pageId, phone, eventName, name, fbp, fbc);
   try {
     await pool.query(
       "INSERT INTO facebook_event_log (phone, event_name, success, error) VALUES ($1, $2, $3, $4)",
@@ -39,7 +41,7 @@ async function sendFacebookEvent(pageId, phone, eventName, name = null) {
   return result;
 }
 
-async function sendFacebookEventInner(pageId, phone, eventName, name) {
+async function sendFacebookEventInner(pageId, phone, eventName, name, fbp, fbc) {
   try {
     const resolvedPageId = await resolvePageId(pageId);
     const cred = await getPageCredential("facebook", "meta", resolvedPageId);
@@ -58,13 +60,15 @@ async function sendFacebookEventInner(pageId, phone, eventName, name) {
       if (firstName) userData.fn = [hash(firstName)];
       if (lastName) userData.ln = [hash(lastName)];
     }
+    if (fbp) userData.fbp = fbp;
+    if (fbc) userData.fbc = fbc;
 
     const body = {
       data: [
         {
           event_name: eventName,
           event_time: Math.floor(Date.now() / 1000),
-          action_source: "system_generated",
+          action_source: fbp || fbc ? "website" : "system_generated",
           user_data: userData,
         },
       ],
