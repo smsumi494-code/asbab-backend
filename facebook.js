@@ -27,6 +27,19 @@ async function resolvePageId(pageId) {
 // but improves match quality when available (already saved on shipped
 // orders from the Send to Courier AI extraction).
 async function sendFacebookEvent(pageId, phone, eventName, name = null) {
+  const result = await sendFacebookEventInner(pageId, phone, eventName, name);
+  try {
+    await pool.query(
+      "INSERT INTO facebook_event_log (phone, event_name, success, error) VALUES ($1, $2, $3, $4)",
+      [phone || null, eventName, result.success, result.error || null]
+    );
+  } catch (err) {
+    console.warn("Could not write facebook_event_log:", err.message);
+  }
+  return result;
+}
+
+async function sendFacebookEventInner(pageId, phone, eventName, name) {
   try {
     const resolvedPageId = await resolvePageId(pageId);
     const cred = await getPageCredential("facebook", "meta", resolvedPageId);
