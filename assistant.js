@@ -16,10 +16,28 @@ const express = require("express");
 const router = express.Router();
 const pool = require("./db");
 const { requireAuth, requireAdmin } = require("./auth");
+const { getPageCredential } = require("./settings");
+
+async function getOpenAiKey() {
+  // This feature isn't tied to any one page, so — same fallback pattern
+  // used elsewhere in the app for "no specific page context" — it uses
+  // whatever OpenAI key is saved on the Al-Haya page. Falls back to a
+  // Railway env var if nothing is saved in the app itself.
+  try {
+    const alHayaPage = await pool.query("SELECT id FROM pages WHERE name = 'Al-Haya' LIMIT 1");
+    const cred = alHayaPage.rows.length
+      ? await getPageCredential("ai", "openai", alHayaPage.rows[0].id)
+      : null;
+    if (cred?.api_key) return cred.api_key;
+  } catch (err) {
+    console.warn("Could not load saved OpenAI credential, falling back to env var:", err.message);
+  }
+  return process.env.OPENAI_API_KEY || null;
+}
 
 async function callOpenAI(userText, systemPrompt, wantJson) {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) throw new Error("OPENAI_API_KEY সেট করা নেই");
+  const apiKey = await getOpenAiKey();
+  if (!apiKey) throw new Error("কোনো OpenAI key পাওয়া যায়নি (অ্যাপের সেটিংসেও না, Railway-তেও না)");
   const body = {
     model: "gpt-4o-mini",
     messages: [
