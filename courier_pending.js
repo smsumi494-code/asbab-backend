@@ -1,0 +1,105 @@
+// courier_pending.js — "All Courier Pending" group. Shows every parcel that
+// is still PENDING at Steadfast, read straight from Steadfast (nothing is
+// stored here). A parcel disappears from the list by itself the moment
+// Steadfast moves it out of Pending (delivered, cancelled, etc.).
+const express = require("express");
+const router = express.Router();
+const pool = require("./db");
+const { requireAuth } = require("./auth");
+const { getPendingParcels, getConsignmentTracking } = require("./steadfast_tracking");
+
+const CACHE_MS = 45 * 1000; // protects Steadfast from repeated hits (many moderators, polling)
+let cache = null; // { at, data }
+let inflight = null;
+
+const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+// "30 Oct 2026" + "12:00 AM" -> sortable number (Dhaka wall-clock, only used for ordering)
+function sortKey(date, time) {
+  const d = /(\d{1,2})\s+([A-Za-z]{3})[a-z]*\s+(\d{4})/.exec(date || "");
+  if (!d) return 0;
+  let h = 0, m = 0;
+  const t = /(\d{1,2}):(\d{2})\s*(AM|PM)/i.exec(time || "");
+  if (t) {
+    h = parseInt(t[1], 10) % 12;
+    if (t[3].toUpperCase() === "PM") h += 12;
+    m = parseInt(t[2], 10);
+  }
+  return Date.UTC(+d[3], MONTHS[d[2].toLowerCase()] ?? 0, +d[1], h, m);
+}
+
+async function loadAll() {
+  const creds = await pool.query(
+    `SELECT c.page_id, c.api_key, c.secret_key, p.name AS page_name
+     FROM api_credentials c LEFT JOIN pages p ON p.id = c.page_id
+     WHERE c.type = 'steadfast_moderator'`
+  );
+  const errors = [];
+  const results = await Promise.all(
+    creds.rows.map(async (row) => {
+      try {
+        const items = await getPendingParcels(row.page_id, row.api_key, row.secret_key);
+        return items.map((i) => ({ ...i, pageId: row.page_id, pageName: row.page_name || null, sortKey: sortKey(i.date, i.time) }));
+      } catch (err) {
+        console.error(`Courier pending failed for page ${row.page_name || row.page_id}:`, err.message);
+        errors.push({ pageName: row.page_name || String(row.page_id), message: err.message });
+        return [];
+      }
+    })
+  );
+  const items = results.flat().sort((a, b) => b.sortKey - a.sortKey);
+  return { items, errors, fetchedAt: new Date().toISOString(), accounts: creds.rows.length };
+}
+
+async function getCached(force) {
+  if (!force && cache && Date.now() - cache.at < CACHE_MS) return cache.data;
+  if (!inflight) {
+    inflight = loadAll()
+      .then((data) => {
+        // Keep the last good list if every account failed this time.
+        if (data.items.length === 0 && data.errors.length > 0 && cache) {
+          return { ...cache.data, errors: data.errors, stale: true };
+        }
+        cache = { at: Date.now(), data };
+        return data;
+      })
+      .finally(() => {
+        inflight = null;
+      });
+  }
+  return inflight;
+}
+
+// GET /api/courier-pending?refresh=1&countOnly=1
+router.get("/", requireAuth, async (req, res) => {
+  try {
+    const data = await getCached(req.query.refresh === "1");
+    if (req.query.countOnly === "1") {
+      return res.json({ count: data.items.length, fetchedAt: data.fetchedAt, hasErrors: data.errors.length > 0 });
+    }
+    res.json(data);
+  } catch (err) {
+    console.error("Courier pending failed:", err);
+    res.status(500).json({ error: err.message || "কুরিয়ার পেন্ডিং তালিকা আনা যায়নি" });
+  }
+});
+
+// GET /api/courier-pending/:parcelId/tracking?pageId=...
+router.get("/:parcelId/tracking", requireAuth, async (req, res) => {
+  try {
+    const parcelId = String(req.params.parcelId).replace(/\D/g, "");
+    const pageId = req.query.pageId;
+    if (!parcelId || !pageId) return res.status(400).json({ error: "parcelId ও pageId দরকার" });
+    const cred = await pool.query(
+      "SELECT api_key, secret_key FROM api_credentials WHERE page_id = $1 AND type = 'steadfast_moderator' LIMIT 1",
+      [pageId]
+    );
+    if (cred.rows.length === 0) return res.status(400).json({ error: "এই পেইজের জন্য Steadfast Moderator অ্যাকাউন্ট সেটআপ করা হয়নি" });
+    const tracking = await getConsignmentTracking(pageId, cred.rows[0].api_key, cred.rows[0].secret_key, parcelId);
+    res.json(tracking);
+  } catch (err) {
+    console.error("Courier pending tracking failed:", err);
+    res.status(500).json({ error: err.message || "ট্র্যাকিং তথ্য আনা যায়নি" });
+  }
+});
+
+module.exports = router;
