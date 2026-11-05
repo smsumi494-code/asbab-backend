@@ -6,7 +6,7 @@ const express = require("express");
 const router = express.Router();
 const pool = require("./db");
 const { requireAuth } = require("./auth");
-const { getPendingParcels, getConsignmentTracking } = require("./steadfast_tracking");
+const { getPendingParcels, getConsignmentTracking, updateParcelNote } = require("./steadfast_tracking");
 
 const NOTE_TTL_MS = 3 * 60 * 1000; // how long a parcel's "last rider note" is reused before re-checking
 const NOTE_CONCURRENCY = 4; // parallel Steadfast page fetches while collecting notes
@@ -78,7 +78,8 @@ async function getCached(force) {
 
 
 // The list page doesn't show rider notes — they only exist on each parcel's
-// own page ("Rider Note: ..." lines in the tracking timeline). So notes are
+// own page ("Rider Note: ..." lines in the tracking timeline; same for the
+// customer phone). So notes/phones are
 // collected in the BACKGROUND (a few parcels at a time, cached for a few
 // minutes) and attached to the list as they arrive; the list itself never
 // waits for them.
@@ -106,7 +107,7 @@ function startNoteWorker(items) {
         if (!cred) continue;
         try {
           const t = await getConsignmentTracking(item.pageId, cred.email, cred.password, item.parcelId);
-          noteCache.set(item.parcelId, { at: Date.now(), note: pickLastRiderNote(t.trackingSteps) });
+          noteCache.set(item.parcelId, { at: Date.now(), note: pickLastRiderNote(t.trackingSteps), phone: t.customerPhone || null });
         } catch (err) {
           console.warn(`Rider note fetch failed for ${item.parcelId}:`, err.message);
         }
@@ -118,12 +119,12 @@ function startNoteWorker(items) {
   });
 }
 
-// Adds lastRiderNote to each item (undefined = not collected yet, null = none).
+// Adds lastRiderNote + customerPhone to each item (undefined = not collected yet, null = none).
 function withNotes(data) {
   startNoteWorker(data.items);
   const items = data.items.map((i) => {
     const c = noteCache.get(i.parcelId);
-    return c ? { ...i, lastRiderNote: c.note } : i;
+    return c ? { ...i, lastRiderNote: c.note, customerPhone: c.phone } : i;
   });
   const notesPending = items.filter((i) => i.lastRiderNote === undefined).length;
   return { ...data, items, notesPending };
@@ -159,6 +160,37 @@ router.get("/:parcelId/tracking", requireAuth, async (req, res) => {
   } catch (err) {
     console.error("Courier pending tracking failed:", err);
     res.status(500).json({ error: err.message || "ট্র্যাকিং তথ্য আনা যায়নি" });
+  }
+});
+
+
+// One Puppeteer note update at a time — each launches a real browser, so
+// several at once could exhaust the server's memory.
+let noteQueue = Promise.resolve();
+
+// POST /api/courier-pending/:parcelId/note  { pageId, note }
+// Sends a note to the rider / courier for this parcel (any logged-in user).
+router.post("/:parcelId/note", requireAuth, async (req, res) => {
+  const parcelId = String(req.params.parcelId).replace(/\D/g, "");
+  const pageId = req.body?.pageId;
+  const note = (req.body?.note || "").trim();
+  if (!parcelId || !pageId) return res.status(400).json({ error: "parcelId ও pageId দরকার" });
+  if (!note) return res.status(400).json({ error: "নোট লিখুন" });
+  try {
+    const cred = await pool.query(
+      "SELECT api_key, secret_key FROM api_credentials WHERE page_id = $1 AND type = 'steadfast_moderator' LIMIT 1",
+      [pageId]
+    );
+    if (cred.rows.length === 0) return res.status(400).json({ error: "এই পেইজের জন্য Steadfast Moderator অ্যাকাউন্ট সেটআপ করা হয়নি" });
+
+    const job = noteQueue.then(() => updateParcelNote(pageId, cred.rows[0].api_key, cred.rows[0].secret_key, parcelId, note));
+    noteQueue = job.catch(() => {}); // keep the queue alive after a failure
+    const result = await job;
+    noteCache.delete(parcelId); // re-read this parcel's notes next time
+    res.json(result);
+  } catch (err) {
+    console.error("Courier pending note failed:", err);
+    res.status(500).json({ error: err.message || "নোট পাঠানো যায়নি" });
   }
 });
 
